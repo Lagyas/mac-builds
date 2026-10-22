@@ -1,0 +1,17 @@
+[package]
+name = "hs2-ffi"
+version = "0.2.0"
+edition = "2021"
+description = "HS2 – Hypersynth 2: C ABI over hs2-core for the Swift / AUv3 front end (include/hs2.h)"
+license = "MIT"
+
+[lib]
+name = "hs2_ffi"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+hs2-core = { path = "../hs2-core" }
+
+[profile.release]
+opt-level = 3
+panic = "abort"

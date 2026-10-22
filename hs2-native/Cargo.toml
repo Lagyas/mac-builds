@@ -1,0 +1,32 @@
+[package]
+name = "hs2-native"
+version = "0.2.0"
+edition = "2021"
+description = "HS2 – Hypersynth 2: synth in the style of Hypersonic 2 (egui) on hs2-core; native desktop and, via ../hs2-web, the browser"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "hs2-native"
+path = "src/main.rs"
+
+[dependencies]
+hs2-core = { path = "../hs2-core" }
+eframe = "0.28"
+rfd = "0.14"
+web-time = "0.2"
+cpal = "0.15"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+midir = "0.10"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+cpal = { version = "0.15", features = ["wasm-bindgen"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "HtmlAnchorElement", "Blob", "BlobPropertyBag", "Url", "Storage"] }
+
+[profile.release]
+opt-level = 3

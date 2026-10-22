@@ -1,0 +1,19 @@
+[package]
+name = "hs2-core"
+version = "0.1.0"
+edition = "2021"
+description = "Synth engine in the style of Hypersonic 2: reads Hypersonic 2 patch/phrase/tuning banks, own DSP, user samples"
+license = "MIT"
+
+# No dependencies: pure std, builds unchanged for native and wasm32-unknown-unknown.
+
+[lib]
+name = "hs2_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hs2"
+path = "src/main.rs"
+
+[profile.release]
+debug = false

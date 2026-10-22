@@ -1,0 +1,93 @@
+# XcodeGen spec of HS2 – Hypersynth 2 for macOS (SwiftUI app + AUv3 plug-in).
+#   brew install xcodegen && xcodegen generate && open HS2.xcodeproj
+# Set your Apple developer team below (or in Xcode ▸ Signing) — needed for
+# the app group that lets the plug-in see the content imported by the app.
+name: HS2
+options:
+  bundleIdPrefix: cz.lagyas
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    MARKETING_VERSION: "0.2.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    # "-" = Sign to Run Locally. With a team: set DEVELOPMENT_TEAM and
+    # CODE_SIGN_IDENTITY "Apple Development".
+    CODE_SIGN_IDENTITY: "-"
+    ENABLE_HARDENED_RUNTIME: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    GENERATE_INFOPLIST_FILE: NO
+    SWIFT_INCLUDE_PATHS: $(SRCROOT)/FFI
+    LIBRARY_SEARCH_PATHS: $(SRCROOT)/build/rust
+    OTHER_LDFLAGS: -lhs2_ffi
+    DEAD_CODE_STRIPPING: YES
+
+aggregateTargets:
+  HS2Rust:
+    buildScripts:
+      - name: Build Rust engine (hs2-ffi)
+        script: |
+          bash "${SRCROOT}/scripts/build_rust.sh"
+        basedOnDependencyAnalysis: false
+    settings:
+      ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+targets:
+  HS2:
+    type: application
+    platform: macOS
+    sources:
+      - App
+      - Shared
+    dependencies:
+      - target: HS2Rust
+      - target: HS2AU
+        embed: true
+      - sdk: AVFoundation.framework
+      - sdk: AudioToolbox.framework
+      - sdk: CoreAudioKit.framework
+      - sdk: CoreMIDI.framework
+    settings:
+      base:
+        PRODUCT_NAME: HS2
+        PRODUCT_BUNDLE_IDENTIFIER: cz.lagyas.hs2
+        INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/HS2.entitlements
+    postBuildScripts:
+      - name: Stamp git commit
+        script: bash "${SRCROOT}/scripts/stamp_commit.sh"
+        inputFiles:
+          - $(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)
+        basedOnDependencyAnalysis: false
+    scheme: {}
+
+  HS2AU:
+    type: app-extension
+    platform: macOS
+    sources:
+      - AU
+      - Shared
+    dependencies:
+      - target: HS2Rust
+      - sdk: AVFoundation.framework
+      - sdk: AudioToolbox.framework
+      - sdk: CoreAudioKit.framework
+    settings:
+      base:
+        PRODUCT_NAME: HS2AU
+        PRODUCT_BUNDLE_IDENTIFIER: cz.lagyas.hs2.au
+        INFOPLIST_FILE: AU/Info.plist
+        CODE_SIGN_ENTITLEMENTS: AU/HS2AU.entitlements
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks"
+    postBuildScripts:
+      - name: Stamp git commit
+        script: bash "${SRCROOT}/scripts/stamp_commit.sh"
+        inputFiles:
+          - $(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)
+        basedOnDependencyAnalysis: false

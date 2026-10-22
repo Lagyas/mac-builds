@@ -1,0 +1,6 @@
+// The Rust engine (../hs2-ffi) as a Swift module: `import HS2FFI`.
+module HS2FFI {
+    header "../../hs2-ffi/include/hs2.h"
+    link "hs2_ffi"
+    export *
+}

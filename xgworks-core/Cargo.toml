@@ -1,0 +1,17 @@
+[package]
+name = "xgworks-core"
+version = "0.1.0"
+edition = "2021"
+description = "Portable core for the Yamaha XGworks .XWS project format <-> Standard MIDI File"
+license = "MIT"
+
+# No dependencies: pure std, so it builds unchanged for native (ARM/macOS/Windows/Linux)
+# and for wasm32-unknown-unknown.
+
+[lib]
+name = "xgworks_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "xgworks"
+path = "src/main.rs"

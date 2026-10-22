@@ -1,0 +1,27 @@
+[package]
+name = "xgworks-native"
+version = "0.2.1"
+edition = "2021"
+description = "XGWorks NextGen — XGworks-style editor/player for .XWS / .MID (egui) on xgworks-core; native desktop and, via ../xgworks-web, the browser"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "xgworks-native"
+path = "src/main.rs"
+
+[dependencies]
+xgworks-core = { path = "../xgworks-core" }
+eframe = "0.28"
+rfd = "0.14"
+web-time = "0.2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+midir = "0.10"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "HtmlAnchorElement", "Blob", "BlobPropertyBag", "Url", "Performance", "Storage"] }

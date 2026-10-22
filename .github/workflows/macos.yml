@@ -1,0 +1,53 @@
+name: macOS apps
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          brew install xcodegen
+          xcodebuild -version
+      - name: Rust tests (engine)
+        run: |
+          cargo test --release --manifest-path hs2-core/Cargo.toml
+          cargo test --release --manifest-path hs2-ffi/Cargo.toml
+      - name: HS2.app (SwiftUI + AUv3)
+        working-directory: hs2-apple
+        run: |
+          xcodegen generate
+          xcodebuild -project HS2.xcodeproj -scheme HS2 -configuration Release \
+            -derivedDataPath dd ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= build | tail -60
+          test -d dd/Build/Products/Release/HS2.app/Contents/PlugIns/HS2AU.appex
+          codesign -dv --entitlements - dd/Build/Products/Release/HS2.app/Contents/PlugIns/HS2AU.appex 2>&1 | tail -20
+      - name: HS2 Classic.app
+        run: sh hs2-native/build_macos.sh
+      - name: XGWorks NextGen.app
+        run: sh xgworks-native/build_macos.sh
+      - name: Package
+        run: |
+          mkdir -p out
+          ditto hs2-apple/dd/Build/Products/Release/HS2.app "out/HS2.app"
+          ditto "hs2-native/target/HS2 Classic.app" "out/HS2 Classic.app"
+          ditto "xgworks-native/target/XGWorks NextGen.app" "out/XGWorks NextGen.app"
+          cp mac-README.txt out/README.txt
+          lipo -archs "out/HS2.app/Contents/MacOS/HS2"
+          cd out && ditto -c -k --sequesterRsrc . ../Lagyas-macOS-apps.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Lagyas-macOS-apps
+          path: Lagyas-macOS-apps.zip
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="build-${{ github.run_number }}"
+          gh release create "$TAG" Lagyas-macOS-apps.zip --prerelease --title "macOS apps $TAG" --notes "$(git log -1 --format=%B)"
