@@ -1,0 +1,16 @@
+[package]
+name = "xgworks-web"
+version = "0.1.0"
+edition = "2021"
+description = "WASM shim exposing xgworks-core's playback plan to the browser (no wasm-bindgen)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+xgworks-core = { path = "../xgworks-core" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"

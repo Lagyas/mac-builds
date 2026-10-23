@@ -1,0 +1,6 @@
+- [XGworks port](xgworks-port.md) — RE of Yamaha XGworks V4.0 → ARM/macOS/web; .XWS format decoded, Rust core M0 done
+- [Czech replies](language-czech.md) — user wants chat replies in Czech
+- [Verify vs original](verify-against-original.md) — always check XGworks port UI against the original (hlp, resources, RE) first
+- [HyperSonic 2 project](hs2-port.md) — HS2-style synth; DRM: no engine/sample decryption, user samples; file locations
+- [XGW-Next](xgw-next.md) — user's Python/Tkinter sequencer repo; Windows checklist done, Fix 7 + CI fixes pushed, mac build green
+- [Project names](project-names.md) — XGW Next (Python), XGWorks NextGen (Rust port), HS2 – Hypersynth 2

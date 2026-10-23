@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HS2 – Hypersynth 2</title>
+<style>
+  :root { --bg: #141416; --fg: #e8e8e8; --dim: #9a9a9a; --acc: #46d6e6; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--fg);
+    font: 14px/1.45 system-ui, "Segoe UI", sans-serif; }
+  #app { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #boot { position: absolute; inset: 0; display: grid; place-items: center; background: var(--bg); z-index: 2; }
+  #boot .box { max-width: 560px; padding: 24px 28px; border: 1px solid #333; border-radius: 8px; background: #1e1e21; }
+  #boot h1 { margin: 0 0 8px; font-size: 18px; }
+  #boot p { margin: 8px 0; color: var(--dim); }
+  #boot button { margin: 10px 8px 0 0; padding: 7px 14px; border: 1px solid #555; border-radius: 5px;
+    background: #2a2a2e; color: var(--fg); font: inherit; cursor: pointer; }
+  #boot button:hover { border-color: var(--acc); }
+  #folder { display: none; }
+</style>
+</head>
+<body>
+<canvas id="app"></canvas>
+<input id="folder" type="file" webkitdirectory multiple>
+<div id="boot"><div class="box">
+  <h1>HS2 – Hypersynth 2</h1>
+  <p id="ver" style="font-size:12px;white-space:pre-line"></p>
+  <p>A synthesizer in the style of Hypersonic 2. It plays its own built-in patches, and can read the
+    patch banks of your own <b>Hypersonic 2 Content</b> folder. Files stay in your browser.</p>
+  <p>Sample elements play a SoundFont (.sf2) you choose on the SETUP page; without one they use
+    built-in substitute sounds.</p>
+  <p id="msg"></p>
+  <button id="go">Start</button>
+  <button id="pick">Start with my content folder…</button>
+</div></div>
+<script type="module">
+import init, { add_file, start, version } from './pkg/hs2_web.js';
+
+const msg = t => document.getElementById('msg').textContent = t;
+const folder = document.getElementById('folder');
+
+// Only what the synth reads: patch / phrase / tuning banks, user patches, and the
+// headers (names) of the sample banks. Protected audio is never loaded in full.
+async function addFolder(files) {
+  let n = 0;
+  for (const f of files) {
+    const rel = f.webkitRelativePath || f.name;
+    const audio = /\/(Samples|Wavetables|Drawbars)\//.test(rel);
+    const wanted = /\/(Patches|Phrases|Tunings|Combi Chains)\//.test(rel) || audio;
+    if (!wanted) continue;
+    const blob = audio ? f.slice(0, 256 * 1024) : f;
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    add_file(rel, bytes);
+    n++;
+  }
+  return n;
+}
+folder.onchange = async () => {
+  msg('Reading content…');
+  const n = await addFolder(folder.files);
+  msg(`${n} content files added.`);
+};
+globalThis.hs2PickFolder = () => folder.click();
+
+async function boot(withFolder) {
+  // MIDI access may wait for a permission prompt: never block the start on it
+  navigator.requestMIDIAccess?.().then(a => globalThis.hs2Midi = a, e => console.warn('Web MIDI unavailable', e));
+  msg('Loading…');
+  await init();
+  document.getElementById('ver').textContent = version();
+  document.title = version().split('\n')[0];
+  document.getElementById('boot').remove();
+  await start('app');
+  if (withFolder) folder.click();
+}
+document.getElementById('go').onclick = () => boot(false);
+document.getElementById('pick').onclick = () => boot(true);
+</script>
+</body>
+</html>

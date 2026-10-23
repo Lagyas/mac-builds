@@ -1,0 +1,17 @@
+[package]
+name = "hs2-web"
+version = "0.2.0"
+edition = "2021"
+description = "Browser build of HS2 – Hypersynth 2: the hs2-native app (egui) compiled to WebAssembly, Web Audio + Web MIDI"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+hs2-native = { path = "../hs2-native" }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true

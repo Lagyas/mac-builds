@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XGWorks NextGen</title>
+<style>
+  :root { --bg: #1b1b1b; --fg: #e8e8e8; --dim: #9a9a9a; --acc: #6666ff; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--fg);
+    font: 14px/1.45 system-ui, "Segoe UI", sans-serif; }
+  #app { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #boot { position: absolute; inset: 0; display: grid; place-items: center; background: var(--bg); z-index: 2; }
+  #boot .box { max-width: 560px; padding: 24px 28px; border: 1px solid #333; border-radius: 8px; background: #222; }
+  #boot h1 { margin: 0 0 8px; font-size: 18px; }
+  #boot p { margin: 8px 0; color: var(--dim); }
+  #boot code { color: var(--fg); }
+  #boot button, #boot label.btn { display: inline-block; margin: 10px 8px 0 0; padding: 7px 14px; border: 1px solid #555;
+    border-radius: 5px; background: #2d2d2d; color: var(--fg); font: inherit; cursor: pointer; }
+  #boot button:hover, #boot label.btn:hover { border-color: var(--acc); }
+  #pick { display: none; }
+  #msg { white-space: pre-line; color: var(--fg) !important; }
+</style>
+</head>
+<body>
+<canvas id="app"></canvas>
+<div id="boot"><div class="box">
+  <h1>XGWorks NextGen</h1>
+  <p id="ver" style="font-size:12px;white-space:pre-line"></p>
+  <p id="msg">Loading…</p>
+  <div id="need" hidden>
+    <p>The editor uses the data of an installed <b>XGworks V4.0</b> (toolbar art, mixer panel, voice lists,
+      XG parameter tables). They are read in your browser only and kept in its storage for next time.</p>
+    <label class="btn" for="pick">Choose the XGworks folder…</label>
+    <input id="pick" type="file" webkitdirectory multiple>
+    <button id="skip">Continue without</button>
+  </div>
+</div></div>
+<script type="module">
+import init, { add_file, start, version } from './pkg/xgworks_web.js';
+
+const q = new URLSearchParams(location.search);
+// XGworks folder on the server; served from F:\rea the default finds F:\rea\XG4
+const XG4 = (q.get('xg4') || '../../XG4/').replace(/\/?$/, '/');
+const msg = t => document.getElementById('msg').textContent = t;
+
+// ---- the files the app reads from the XGworks folder ----
+const ROOT = ['XGworks.exe', 'ws.ini', 'DrvShortName.ini', 'Trk.ini'];
+const text = b => new TextDecoder('latin1').decode(b);
+function section(ini, name) {
+  const out = [];
+  let on = false;
+  for (const l of ini.split(/\r?\n/)) {
+    if (l.startsWith('[')) { on = l.trim().toLowerCase() === '[' + name.toLowerCase() + ']'; continue; }
+    if (on && l.includes('=')) out.push(l.slice(l.indexOf('=') + 1).trim());
+  }
+  return out;
+}
+const voiceFiles = ws => section(text(ws), 'voice list').filter(Boolean).map(n => n + '.ini');
+const editorFiles = ini => [...new Set([...text(ini).matchAll(/^\s*(?:prmfile|voicefile)\s*=\s*(.+?)\s*$/gmi)].map(m => 'XGEditor/' + m[1]))];
+
+/// Collect the needed files through `get(relPath) -> Uint8Array | null`.
+async function collect(get) {
+  const files = new Map();
+  const put = async p => { const b = await get(p); if (b) files.set(p, b); return b; };
+  for (const p of ROOT) await put(p);
+  const ws = files.get('ws.ini');
+  if (!ws) return null;
+  await Promise.all(voiceFiles(ws).map(put));
+  const xe = await put('XGEditor/xgeditor.ini');
+  if (xe) await Promise.all(editorFiles(xe).map(put));
+  return files;
+}
+
+async function fetchBytes(url) {
+  try { const r = await fetch(url); return r.ok ? new Uint8Array(await r.arrayBuffer()) : null; } catch { return null; }
+}
+
+// ---- IndexedDB cache of a picked folder ----
+const db = () => new Promise((ok, no) => {
+  const r = indexedDB.open('xgworks', 1);
+  r.onupgradeneeded = () => r.result.createObjectStore('files');
+  r.onsuccess = () => ok(r.result); r.onerror = () => no(r.error);
+});
+async function cacheLoad() {
+  try {
+    const d = await db();
+    return await new Promise(ok => {
+      const st = d.transaction('files').objectStore('files'), m = new Map();
+      st.openCursor().onsuccess = e => { const c = e.target.result; if (c) { m.set(c.key, new Uint8Array(c.value)); c.continue(); } else ok(m.size ? m : null); };
+    });
+  } catch { return null; }
+}
+async function cacheSave(files) {
+  try {
+    const d = await db(), tx = d.transaction('files', 'readwrite'), st = tx.objectStore('files');
+    st.clear();
+    for (const [k, v] of files) st.put(v, k);
+    await new Promise(ok => tx.oncomplete = ok);
+  } catch (e) { console.warn('cache', e); }
+}
+
+function pickFolder() {
+  document.getElementById('need').hidden = false;
+  return new Promise(ok => {
+    document.getElementById('skip').onclick = () => ok(new Map());
+    document.getElementById('pick').onchange = async ev => {
+      // map "XG4/sub/file" -> File, case-insensitive, without the top folder
+      const all = new Map();
+      for (const f of ev.target.files) all.set(f.webkitRelativePath.split('/').slice(1).join('/').toLowerCase(), f);
+      const get = async p => { const f = all.get(p.toLowerCase()); return f ? new Uint8Array(await f.arrayBuffer()) : null; };
+      const files = await collect(get);
+      if (!files) { msg('ws.ini was not found there — choose the folder that contains XGworks.exe.'); return; }
+      const font = all.get('msgothic.ttc');
+      if (font) files.set('../fonts/msgothic.ttc', new Uint8Array(await font.arrayBuffer()));
+      document.getElementById('need').hidden = true;
+      msg('Saving…');
+      await cacheSave(files);
+      ok(files);
+    };
+  });
+}
+
+async function main() {
+  await init();
+  document.getElementById('ver').textContent = version();
+  document.title = version().split('\n')[0];
+  // MIDI access (with SysEx for the XG setup); the app picks the outputs up
+  // as soon as the browser's prompt is answered
+  if (navigator.requestMIDIAccess) {
+    navigator.requestMIDIAccess({ sysex: true })
+      .catch(() => navigator.requestMIDIAccess())
+      .then(a => globalThis.xgwMidi = a, e => console.warn('no Web MIDI', e));
+  }
+
+  msg('Loading the XGworks data…');
+  let files = await collect(p => fetchBytes(XG4 + p));
+  if (!files) files = await cacheLoad();
+  if (!files) { msg('XGworks data not found next to the page.'); files = await pickFolder(); }
+  for (const [p, b] of files) add_file(p.startsWith('../') ? p.slice(3) : 'XG4/' + p, b);
+  // MS Gothic for the List window, if put next to the page or into the XGworks folder
+  const font = await fetchBytes('fonts/msgothic.ttc') || await fetchBytes(XG4 + 'msgothic.ttc');
+  if (font) add_file('fonts/msgothic.ttc', font);
+
+  // optional: ?song=<url>&args=--list 3 --mixer  (same options as the native app)
+  const args = [];
+  const song = q.get('song');
+  if (song) {
+    msg('Loading the song…');
+    const b = await fetchBytes(song);
+    if (b) { const name = 'song/' + decodeURIComponent(song.split('/').pop()); add_file(name, b); args.push(name); }
+  }
+  if (q.get('args')) args.push(...q.get('args').split(/\s+/).filter(Boolean));
+
+  document.getElementById('boot').remove();
+  await start('app', args);
+}
+// keys the editor uses must not trigger the browser's own commands
+// (select all, find, bookmarks, reload, help …); copy / cut / paste stay
+// with the browser so the clipboard events reach the app
+document.addEventListener('keydown', e => {
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  if ((e.ctrlKey || e.metaKey) && 'abdfghjklnopsuyz'.includes(k) && k.length === 1) e.preventDefault();
+  else if (/^F([1-9]|10)$/.test(k)) e.preventDefault();
+}, true);
+main().catch(e => { console.error(e); msg('Failed to start: ' + e); });
+</script>
+</body>
+</html>
