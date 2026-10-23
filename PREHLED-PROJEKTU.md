@@ -34,8 +34,8 @@ projektu; zdrojáky přidej z GitHubu (repo `Lagyas/mac-builds`, „Add from Git
 - Formátová fakta: patch záznam „StSS“, 0x220 hlavička, 256 patch parametrů, elementy (32B jméno + 256 f32) až do netisknutelného jména; typ elementu = ceil(v·16)−1, FX typ = round(v·128), sample bank/wave = floor(·128), mod src/mod = floor(v·72); vlastní patch = slovo 0x08 „HS2X“; fráze 24B události; kombinace .fxb chunk StSS 0x990f3e/46, 16 partů, flag 0x100 = link.
 
 ## Mac buildy
-- Privátní repo **https://github.com/Lagyas/mac-builds** = kopie všech Rust/Swift projektů (sync skript `tools/sync_macbuild.sh` z lokálních repozitářů), workflow `.github/workflows/macos.yml` (spouští se ručně: Actions ▸ macOS apps ▸ Run workflow) → zip se třemi aplikacemi (HS2.app, HS2 Classic.app, XGWorks NextGen.app).
-- Stav 2026-10-23: GitHub úlohu nespustil kvůli **billingu účtu** (platba / spending limit; macOS minuty u privátních repo jsou placené). Po opravě billingu spustit workflow znovu.
+- Veřejné repo **https://github.com/Lagyas/mac-builds** = kopie všech Rust/Swift projektů (sync skript `tools/sync_macbuild.sh` z lokálních repozitářů), workflow `.github/workflows/macos.yml` (spouští se ručně: Actions ▸ macOS apps ▸ Run workflow) → zip se třemi aplikacemi (HS2.app, HS2 Classic.app, XGWorks NextGen.app).
+- Stav 2026-10-23: repo přepnuto na **veřejné** → Actions minuty (i macOS) zdarma; dřívější blokace billingem odpadá. Složka `claude-memory` z repa odstraněna (poznámky zůstávají jen lokálně).
 - Ruční build na Macu: viz `README.md` v kořeni repa.
 
 ## Lokální struktura (Windows, F:\rea)

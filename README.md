@@ -1,4 +1,4 @@
-# HS2 – Hypersynth 2 + XGWorks NextGen (private)
+# HS2 – Hypersynth 2 + XGWorks NextGen
 
 Contents:
 
@@ -14,7 +14,6 @@ Contents:
 | `xgworks-web` | XGWorks NextGen in the browser (wasm) |
 | `tools` | helper scripts (Windows GUI testing, resource dumps) |
 | `PREHLED-PROJEKTU.md` | project overview / handoff (Czech) |
-| `claude-memory` | Claude Code memory notes for these projects |
 
 No Yamaha / Steinberg content is in this repository. The apps read the user's own installation at run time.
 
@@ -58,4 +57,4 @@ The apps are not notarized. On first start, run `xattr -cr <app>` or use right-c
 
 ## CI
 
-Actions ▸ **macOS apps** ▸ Run workflow builds all three apps into one zip, attached as a release. It needs GitHub Actions macOS minutes on the account.
+Actions ▸ **macOS apps** ▸ Run workflow builds all three apps into one zip, attached as a release. The repository is public, so GitHub Actions minutes are free.
