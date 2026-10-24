@@ -292,6 +292,8 @@ pub struct RollState {
     /// Note palette (ShortCut.hlp): length of notes the pencil enters, as
     /// (quarter-note multiple ×12, so triplets are whole numbers); 0 = the grid.
     pub note_len: u32,
+    /// Edit ▸ Repeat (Alt+R): [from bar, to bar, insert bar, times].
+    repeat: Option<[u32; 4]>,
 }
 
 impl RollState {
@@ -341,6 +343,7 @@ impl RollState {
             staff: None,
             export_req: false,
             note_len: 0,
+            repeat: None,
         }
     }
 }
@@ -1002,6 +1005,68 @@ impl RollState {
                 sort_notes(&mut tr.notes, &mut self.sel);
             }
         }
+        // Repeat (Alt+R, Menu.hlp "リピート"): copies the events of a bar range
+        // (only the selected notes when there is a selection) to a bar, n times
+        if ui.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::R)) && self.repeat.is_none() {
+            let (a, b) = if self.sel.is_empty() {
+                (self.cursor / bar + 1, self.cursor / bar + 2)
+            } else {
+                let lo = self.sel.iter().filter_map(|&i| tr.notes.get(i)).map(|n| n.tick).min().unwrap_or(0);
+                let hi = self.sel.iter().filter_map(|&i| tr.notes.get(i)).map(|n| n.tick + n.dur).max().unwrap_or(lo + 1);
+                (lo / bar + 1, (hi + bar - 1) / bar + 1)
+            };
+            self.repeat = Some([a, b, b, 1]);
+        }
+        if let Some(mut r) = self.repeat {
+            let mut act = 0;
+            egui::Window::new("Repeat").collapsible(false).resizable(false).show(ui.ctx(), |ui| {
+                egui::Grid::new("rep").num_columns(2).show(ui, |ui| {
+                    for (k, label) in ["Copy from bar", "Copy to bar", "Insert at bar", "Times"].iter().enumerate() {
+                        ui.label(*label);
+                        ui.add(egui::DragValue::new(&mut r[k]).range(1..=9999));
+                        ui.end_row();
+                    }
+                });
+                ui.label(if self.sel.is_empty() { "All events of the range" } else { "Only the selected notes" });
+                ui.horizontal(|ui| {
+                    if ui.button(egui::RichText::new("OK").strong()).clicked() {
+                        act = 1;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        act = 2;
+                    }
+                });
+            });
+            self.repeat = Some(r);
+            if act == 1 && r[1] > r[0] {
+                self.snapshot(tr);
+                let (s0, s1, at) = ((r[0] - 1) * bar, (r[1] - 1) * bar, (r[2] - 1) * bar);
+                let len = s1 - s0;
+                let src: Vec<EditNote> = if self.sel.is_empty() {
+                    tr.notes.iter().filter(|n| n.tick >= s0 && n.tick < s1).cloned().collect()
+                } else {
+                    self.sel.iter().filter_map(|&i| tr.notes.get(i)).cloned().collect()
+                };
+                let others: Vec<Event> = if self.sel.is_empty() { tr.others.iter().filter(|e| e.t() >= s0 && e.t() < s1).cloned().collect() } else { Vec::new() };
+                for k in 0..r[3] {
+                    let off = at + k * len;
+                    for n in &src {
+                        tr.notes.push(EditNote { tick: n.tick - s0 + off, ..n.clone() });
+                    }
+                    for e in &others {
+                        tr.others.push(e.shifted(off.wrapping_sub(s0)));
+                    }
+                }
+                tr.others.sort_by_key(|e| e.t());
+                self.sel.clear();
+                sort_notes(&mut tr.notes, &mut self.sel);
+                changed = true;
+            }
+            if act != 0 {
+                self.repeat = None;
+            }
+        }
+
         // edit cursor
         let cx_x = x_of(self.cursor);
         if cx_x >= gx0 && cx_x <= notes.right() {

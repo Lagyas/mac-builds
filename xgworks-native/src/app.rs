@@ -207,6 +207,8 @@ struct App {
     chord_sel: Vec<(usize, usize)>,
     chord_dlg: Option<chordlane::ChordDlg>,
     chord_drag: Option<u32>,
+    /// Edit ▸ block command dialog.
+    block_dlg: Option<blockops::BlockDlg>,
     /// Plug-in windows (Auto Play, Importer), open while Some.
     autoplay: Option<pluginwin::AutoPlay>,
     importer: Option<pluginwin::Importer>,
@@ -345,6 +347,7 @@ impl App {
             chord_sel: Vec::new(),
             chord_dlg: None,
             chord_drag: None,
+            block_dlg: None,
             tv_tool: TvTool::Arrow,
             tv_drag: None,
             bond_first: None,
@@ -729,6 +732,8 @@ mod record;
 mod transport_win;
 #[path = "chordlane.rs"]
 mod chordlane;
+#[path = "blockops.rs"]
+mod blockops;
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -786,6 +791,8 @@ impl eframe::App for App {
                         self.tv_undo_redo(false);
                         ui.close_menu();
                     }
+                    ui.separator();
+                    self.block_menu(ui);
                     ui.separator();
                     if ui.add_enabled(has, egui::Button::new("Insert Chord…")).on_hover_text("XF chord at the song position (or click the C lane with the pencil)").clicked() {
                         let t = self.cur_tick();
@@ -1118,6 +1125,7 @@ impl eframe::App for App {
         self.lyrics_window(ctx);
         self.markers_window(ctx);
         self.chord_dialog(ctx);
+        self.block_dialog(ctx);
         // XF Information Editor
         if let Some(d) = &mut self.xf_dlg {
             match xfwin::ui(ctx, d) {
