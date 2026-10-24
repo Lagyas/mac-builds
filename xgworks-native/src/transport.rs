@@ -58,7 +58,7 @@ impl App {
     pub(super) fn cur_tick(&self) -> u32 {
         match (&self.play_start, &self.play_tm) {
             (Some(st), Some(tm)) => {
-                let ms = tm.to_ms(self.play_from) + st.elapsed().as_secs_f64() * 1000.0;
+                let ms = tm.to_ms(self.play_from) + (st.elapsed().as_secs_f64() * 1000.0 - self.count_in_ms).max(0.0);
                 tm.from_ms(ms)
             }
             _ => self.song_pos,
@@ -111,6 +111,8 @@ impl App {
             self.locate(tm.from_mbc(m.saturating_sub(self.rewind_bars).max(1), 1, 0));
         } else if key(egui::Key::Minus) {
             self.loop_on = !self.loop_on;
+        } else if key(egui::Key::Plus) && !self.recording {
+            self.rec_armed = !self.rec_armed;
         }
     }
 

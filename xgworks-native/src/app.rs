@@ -9,11 +9,11 @@ use std::sync::Arc;
 
 use crate::platform::{self, Instant};
 use crate::player::{self, open_device, send_dev, send_shared, PlayHandle, SharedOut};
-use crate::{clip, icons, jobwin, listwin, lyricwin, midiio, mixwin, pianoroll, pluginwin, xfwin, xged};
+use crate::{clip, icons, jobwin, listwin, lyricwin, markerwin, midiio, mixwin, pianoroll, pluginwin, xfwin, xged};
 
 use eframe::egui;
 use xgworks_core::mixer::{self, PartMix};
-use xgworks_core::{edit_model, edit_playback_plan, write_mid, write_xws, EditTrack, Event};
+use xgworks_core::{edit_model, edit_playback_plan, EditTrack, Event};
 
 /// Command-line style options: `<file> [--roll N] [--list N] [--mixer] [--xg]`
 /// (open views directly; handy for side-by-side checks against the original).
@@ -44,6 +44,8 @@ fn apply_args(app: &mut App, args: &[String]) {
             }
             "--mixer" => app.show_mixer = true,
             "--lyrics" => app.open_lyrics(),
+            "--master" => app.open_master(),
+            "--markers" => app.markers_win = Some(markerwin::MarkerState::new()),
             "--xg" => app.show_xg = true,
             "--autoplay" | "--importer" => {
                 let files = it.next().and_then(|f| platform::read(std::path::Path::new(f))).map(|b| pluginwin::list_files(&b)).unwrap_or_default();
@@ -126,6 +128,27 @@ struct App {
     /// A song chosen in the Open dialog, loaded on the next frame.
     picked: platform::Picked,
     file_name: String,
+    /// Where the song was opened from / saved to (Save overwrites it).
+    file_path: Option<std::path::PathBuf>,
+    /// Hash of the song as last loaded / saved (unsaved-changes check).
+    saved_hash: u64,
+    /// "Save changes?" is being asked before this command.
+    ask_save: Option<fileops::After>,
+    /// Exit confirmed: let the window close.
+    quitting: bool,
+    // ---- recording (record.rs)
+    midi_in: Option<midiio::InConn>,
+    in_dev: Option<usize>,
+    in_buf: record::InBuf,
+    thru: bool,
+    thru_target: record::ThruTarget,
+    metro: record::Metronome,
+    rec_armed: bool,
+    recording: bool,
+    rec_track: usize,
+    take_start: Option<Instant>,
+    /// Count-in before the song position (ms), playback is shifted by it.
+    count_in_ms: f64,
     status: String,
     /// One MIDI connection shared by the player thread and the mixer.
     midi: SharedOut,
@@ -162,6 +185,8 @@ struct App {
     xf_dlg: Option<xfwin::XfDialog>,
     /// Lyrics / karaoke editor window, open while Some.
     lyrics: Option<lyricwin::LyricsState>,
+    /// Markers window (Edit ▸ Add Marker / Marker List), open while Some.
+    markers_win: Option<markerwin::MarkerState>,
     /// Plug-in windows (Auto Play, Importer), open while Some.
     autoplay: Option<pluginwin::AutoPlay>,
     importer: Option<pluginwin::Importer>,
@@ -253,6 +278,21 @@ impl App {
             player: None,
             picked: Default::default(),
             file_name: String::new(),
+            file_path: None,
+            saved_hash: 0,
+            ask_save: None,
+            quitting: false,
+            midi_in: None,
+            in_dev: None,
+            in_buf: Default::default(),
+            thru: true,
+            thru_target: Default::default(),
+            metro: Default::default(),
+            rec_armed: false,
+            recording: false,
+            rec_track: 0,
+            take_start: None,
+            count_in_ms: 0.0,
             status: "Open an .XWS or .MID file.".into(),
             midi: Default::default(),
             port_map: vec![None; 16],
@@ -280,6 +320,7 @@ impl App {
             jobs: jobwin::JobState::new(&platform::read(&platform::xg4("JobDll.ini")).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()),
             xf_dlg: None,
             lyrics: None,
+            markers_win: None,
             tv_tool: TvTool::Arrow,
             tv_drag: None,
             bond_first: None,
@@ -439,9 +480,24 @@ impl App {
         }
     }
 
+    /// Load a song file; `name` may be its full path (natively).
     fn load(&mut self, bytes: &[u8], name: &str) {
-        self.stop();
         let (model, ppqn) = edit_model(bytes);
+        let path = std::path::Path::new(name);
+        let short = path.file_name().and_then(|s| s.to_str()).unwrap_or(name).to_string();
+        self.load_model(model, ppqn, &short);
+        self.file_path = if path.is_absolute() { Some(path.to_path_buf()) } else { None };
+        self.status = format!(
+            "Loaded {short} — {} tracks, {} notes.",
+            self.edit.iter().filter(|t| !t.conductor).count(),
+            self.edit.iter().map(|t| t.notes.len()).sum::<usize>()
+        );
+    }
+
+    /// Replace the song (open, new, close).
+    fn load_model(&mut self, model: Vec<EditTrack>, ppqn: u16, name: &str) {
+        self.stop();
+        self.song_pos = 0;
         self.flags = model.iter().map(|t| (t.mute(), t.solo())).collect();
         self.trns_edit = None;
         self.blk_sel.clear();
@@ -463,11 +519,8 @@ impl App {
         self.sel_track = self.edit.iter().position(|t| !t.notes.is_empty()).unwrap_or(0);
         self.rebuild_view();
         self.file_name = name.to_string();
-        self.status = format!(
-            "Loaded {name} — {} tracks, {} notes.",
-            self.edit.iter().filter(|t| !t.conductor).count(),
-            self.edit.iter().map(|t| t.notes.len()).sum::<usize>()
-        );
+        self.lyrics = None;
+        self.mark_saved();
     }
 
     fn rebuild_view(&mut self) {
@@ -534,6 +587,7 @@ impl App {
             self.status = "No file loaded or no MIDI output.".into();
             return;
         }
+        self.finish_take(); // a loop restart ends the take so far
         self.halt();
         self.sync_audible();
         self.monitoring = other.is_some();
@@ -544,9 +598,10 @@ impl App {
         let from = if self.monitoring { 0 } else { self.song_pos };
         let tm = xgworks_core::listev::TimeMap::new(&tracks, ppqn);
         let msgs = transport::from_position(edit_playback_plan(&tracks, ppqn), tm.to_ms(from));
+        let msgs = self.add_clicks(msgs, &tm, from);
         self.play_from = from;
         self.play_tm = Some(tm);
-        self.play_len_ms = msgs.last().map_or(0.0, |m| m.0);
+        self.play_len_ms = if self.recording { f64::INFINITY } else { msgs.last().map_or(0.0, |m| m.0) };
 
         if !self.ensure_midi() {
             self.status = "Could not open the MIDI output.".into();
@@ -586,6 +641,7 @@ impl App {
 
     /// Stop; the song position stays where playback was.
     fn stop(&mut self) {
+        self.finish_take();
         if self.playing && !self.monitoring {
             self.song_pos = self.cur_tick().min(self.total_ticks);
         }
@@ -640,21 +696,14 @@ impl App {
         }
     }
 
-    fn save(&mut self, as_mid: bool) {
-        let (ext, filter) = if as_mid { ("mid", "MIDI") } else { ("xws", "XGworks") };
-        let default = format!(
-            "{}.{ext}",
-            std::path::Path::new(&self.file_name).file_stem().and_then(|s| s.to_str()).unwrap_or("song")
-        );
-        let bytes = if as_mid { write_mid(&self.edit, self.ppqn) } else { write_xws(&self.edit, self.ppqn) };
-        if let Some(msg) = platform::save_song(&default, ext, filter, &bytes) {
-            self.status = msg;
-        }
-    }
 }
 
 #[path = "transport.rs"]
 mod transport;
+#[path = "fileops.rs"]
+mod fileops;
+#[path = "record.rs"]
+mod record;
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -663,8 +712,11 @@ impl eframe::App for App {
             self.load(&bytes, &name);
         }
         track_key_focus(ctx);
+        self.file_keys(ctx);
+        self.save_question(ctx);
         self.transport_keys(ctx);
         self.loop_check();
+        self.record_tick();
         self.prefs_window(ctx);
         if cfg!(target_arch = "wasm32") && !self.playing {
             let now = ctx.input(|i| i.time);
@@ -697,15 +749,14 @@ impl eframe::App for App {
         egui::TopBottomPanel::top("bar").show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
-                if ui.button("📂 Open…").clicked() {
-                    platform::open_song(&self.picked, ui.ctx());
+                self.file_menu(ui);
+                if ui.button("Open").on_hover_text("Open (Ctrl+O)").clicked() {
+                    let c = ui.ctx().clone();
+                    self.file_command(fileops::After::Open, &c);
                 }
                 let has = !self.edit.is_empty();
-                if ui.add_enabled(has, egui::Button::new("💾 .XWS")).clicked() {
-                    self.save(false);
-                }
-                if ui.add_enabled(has, egui::Button::new("💾 .MID")).clicked() {
-                    self.save(true);
+                if ui.add_enabled(has, egui::Button::new("Save")).on_hover_text("Save (Ctrl+S)").clicked() {
+                    self.save_current();
                 }
                 ui.separator();
                 // Track View edit tools, with the original's toolbar icons
@@ -730,6 +781,7 @@ impl eframe::App for App {
                 }
                 ui.separator();
                 self.transport_bar(ui);
+                self.record_buttons(ui);
                 ui.end_row();
                 ui.separator();
                 ui.add_enabled_ui(has, |ui| {
@@ -757,6 +809,22 @@ impl eframe::App for App {
                         ui.close_menu();
                     }
                 });
+                ui.menu_button("Edit", |ui| {
+                    if ui.add_enabled(!self.tv_undo.is_empty(), egui::Button::new("Undo                   Ctrl+Z")).clicked() {
+                        self.tv_undo_redo(true);
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(!self.tv_redo.is_empty(), egui::Button::new("Redo                   Ctrl+Y")).clicked() {
+                        self.tv_undo_redo(false);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.add_enabled(has, egui::Button::new("Add Marker / Marker List…")).clicked() {
+                        self.markers_win.get_or_insert_with(markerwin::MarkerState::new);
+                        ui.close_menu();
+                    }
+                });
+                self.setup_menu(ui);
                 ui.menu_button("Window", |ui| {
                     let t = self.sel_track;
                     let has_t = t < self.edit.len();
@@ -781,7 +849,11 @@ impl eframe::App for App {
                         self.xg.sync_from_song(&self.edit);
                         ui.close_menu();
                     }
-                    if ui.add_enabled(has, egui::Button::new("Lyrics / Karaoke       F8")).clicked() {
+                    if ui.add_enabled(has, egui::Button::new("Master Track           F8")).clicked() {
+                        self.open_master();
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(has, egui::Button::new("Lyrics / Karaoke       F9")).clicked() {
                         self.open_lyrics();
                         ui.close_menu();
                     }
@@ -935,7 +1007,7 @@ impl eframe::App for App {
             let mut edited = false;
             let mut out = Vec::new();
             lists.retain_mut(|(id, st)| {
-                let title = format!("List:{} - {}", *id + 1, st.title(&self.edit));
+                let title = if st.master { "Master Track".to_string() } else { format!("List:{} - {}", *id + 1, st.title(&self.edit)) };
                 let edit = &mut self.edit;
                 sub_window(ctx, ("list", *id), &title, [1100.0, 640.0], |ui| edited |= st.ui(ui, edit, &cx, &mut out))
             });
@@ -966,6 +1038,7 @@ impl eframe::App for App {
         }
         self.plugin_windows(ctx);
         self.lyrics_window(ctx);
+        self.markers_window(ctx);
         // XF Information Editor
         if let Some(d) = &mut self.xf_dlg {
             match xfwin::ui(ctx, d) {
@@ -1686,6 +1759,9 @@ impl App {
             self.show_mixer = !self.show_mixer;
         }
         if ctx.input(|i| i.key_pressed(egui::Key::F8)) {
+            self.open_master();
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::F9)) {
             self.open_lyrics();
         }
         if ctx.input(|i| i.key_pressed(egui::Key::F7)) {
@@ -1749,18 +1825,20 @@ impl App {
             self.song_edited();
         }
         if k.undo {
-            if let Some(prev) = self.tv_undo.pop() {
-                self.tv_redo.push(std::mem::replace(&mut self.edit, prev));
-                self.blk_sel.clear();
-                self.song_edited();
-            }
+            self.tv_undo_redo(true);
         }
         if k.redo {
-            if let Some(next) = self.tv_redo.pop() {
-                self.tv_undo.push(std::mem::replace(&mut self.edit, next));
-                self.blk_sel.clear();
-                self.song_edited();
-            }
+            self.tv_undo_redo(false);
+        }
+    }
+
+    /// Song-level undo / redo (Track View, markers, lyrics, mixer insert …).
+    fn tv_undo_redo(&mut self, undo: bool) {
+        let (from, to) = if undo { (&mut self.tv_undo, &mut self.tv_redo) } else { (&mut self.tv_redo, &mut self.tv_undo) };
+        if let Some(prev) = from.pop() {
+            to.push(std::mem::replace(&mut self.edit, prev));
+            self.blk_sel.clear();
+            self.song_edited();
         }
     }
 
@@ -1971,6 +2049,26 @@ impl App {
         self.open_list(spans);
     }
 
+    /// The master track: the conductor track (XWS), else the first track (SMF).
+    fn master_track(&self) -> Option<usize> {
+        if self.edit.is_empty() {
+            return None;
+        }
+        Some(self.edit.iter().position(|t| t.conductor).unwrap_or(0))
+    }
+
+    /// Master Track window (Window ▸ Master Track, F8 like the original).
+    fn open_master(&mut self) {
+        let Some(m) = self.master_track() else { return };
+        if self.open_lists.iter().any(|(_, st)| st.master) {
+            return;
+        }
+        let mut st = listwin::ListState::new_master(m);
+        st.id = self.next_list_id;
+        self.open_lists.push((self.next_list_id, st));
+        self.next_list_id += 1;
+    }
+
     /// Lyrics editor: on the first track with lyric events, else the selected one.
     fn open_lyrics(&mut self) {
         if self.edit.is_empty() || self.lyrics.is_some() {
@@ -1983,6 +2081,29 @@ impl App {
             .find(|&i| self.edit[i].others.iter().any(|e| matches!(e, Event::Meta { mtype: lyricwin::LYRIC, .. })))
             .unwrap_or(self.sel_track.min(self.edit.len() - 1));
         self.lyrics = Some(lyricwin::LyricsState::new(t));
+    }
+
+    /// Markers window and its actions.
+    fn markers_window(&mut self, ctx: &egui::Context) {
+        let Some(mut st) = self.markers_win.take() else { return };
+        let Some(master) = self.master_track() else { return };
+        let tm = self.time_map();
+        let pos = self.cur_tick();
+        let mut acts = Vec::new();
+        let open = sub_window(ctx, "markers", "Markers", [460.0, 460.0], |ui| acts = st.ui(ui, &self.edit, master, &tm, pos));
+        for a in acts {
+            match a {
+                markerwin::MarkerAction::Edit(f) => {
+                    self.tv_snapshot();
+                    f(&mut self.edit);
+                    self.song_edited();
+                }
+                markerwin::MarkerAction::Locate(t) => self.locate(t),
+            }
+        }
+        if open {
+            self.markers_win = Some(st);
+        }
     }
 
     /// Lyrics window and its actions.

@@ -729,7 +729,7 @@ pub fn editable(e: &Event, col: usize) -> bool {
             0xA0 | 0xB0 => col < 2,
             _ => col == 0,
         },
-        Event::Meta { mtype, .. } => col == 0 && matches!(mtype, 0x01..=0x07 | 0x51 | 0x58),
+        Event::Meta { mtype, .. } => col == 0 && matches!(mtype, 0x01..=0x07 | 0x51 | 0x58 | 0x59),
         Event::Sysex { .. } => col == 1,
     }
 }
@@ -836,6 +836,17 @@ pub fn set_value(e: &Event, col: usize, text: &str, ppqn: u32) -> Option<Event> 
             let us = (60_000_000.0 / bpm.clamp(1.0, 999.0)).round() as u32;
             Some(Event::Meta { t: *tk, mtype: 0x51, data: vec![(us >> 16) as u8, (us >> 8) as u8, us as u8] })
         }
+        (Event::Meta { mtype: 0x59, t: tk, .. }, 0) => {
+            let norm = |x: &str| x.to_lowercase().replace(' ', "");
+            let want = norm(t);
+            let hit = |keys: &[&str; 15]| keys.iter().position(|k| norm(k) == want || norm(k.split('(').next().unwrap_or(k)) == want);
+            let (i, minor) = match (hit(&KEYS_MAJ), hit(&KEYS_MIN)) {
+                (Some(i), _) => (i, 0u8),
+                (None, Some(i)) => (i, 1u8),
+                _ => return None,
+            };
+            Some(Event::Meta { t: *tk, mtype: 0x59, data: vec![(i as i32 - 7) as i8 as u8, minor] })
+        }
         (Event::Meta { mtype: 0x58, data, t: tk, .. }, 0) => {
             let (n, d) = t.split_once('/')?;
             let (n, d): (u8, u32) = (n.trim().parse().ok()?, d.trim().parse().ok()?);
@@ -901,6 +912,12 @@ pub enum NewKind {
     InstName,
     Lyric,
     Marker,
+    // master track (Master.hlp)
+    Tempo,
+    TimeSig,
+    KeySig,
+    Copyright,
+    CuePoint,
 }
 
 impl NewKind {
@@ -908,6 +925,11 @@ impl NewKind {
         NewKind::Note, NewKind::PolyAfter, NewKind::Control, NewKind::Program, NewKind::ChAfter, NewKind::PitchBend,
         NewKind::Nrpn, NewKind::Rpn, NewKind::Voice, NewKind::SysEx, NewKind::Text, NewKind::SeqName,
         NewKind::InstName, NewKind::Lyric, NewKind::Marker,
+    ];
+    /// The events of the Master Track window.
+    pub const MASTER: [NewKind; 10] = [
+        NewKind::Tempo, NewKind::TimeSig, NewKind::KeySig, NewKind::Marker, NewKind::Text, NewKind::SeqName,
+        NewKind::Copyright, NewKind::InstName, NewKind::Lyric, NewKind::CuePoint,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -926,6 +948,11 @@ impl NewKind {
             NewKind::InstName => "Instrument Name",
             NewKind::Lyric => "Lyric",
             NewKind::Marker => "Marker",
+            NewKind::Tempo => "Tempo",
+            NewKind::TimeSig => "Time Signature",
+            NewKind::KeySig => "Key Signature",
+            NewKind::Copyright => "Copyright Notice",
+            NewKind::CuePoint => "Cue Point",
         }
     }
     /// (label, min, max, default) of the dialog's value fields.
@@ -940,12 +967,15 @@ impl NewKind {
             NewKind::Nrpn => &[("MSB", 0, 127, 1), ("LSB", 0, 127, 8), ("Data MSB", 0, 127, 64), ("Data LSB", -1, 127, -1)],
             NewKind::Rpn => &[("MSB", 0, 127, 0), ("LSB", 0, 127, 0), ("Data MSB", 0, 127, 2), ("Data LSB", -1, 127, -1)],
             NewKind::Voice => &[("Bank MSB", 0, 127, 0), ("Bank LSB", 0, 127, 0), ("Program", 1, 128, 1)],
+            NewKind::Tempo => &[("BPM", 20, 300, 120)],
+            NewKind::TimeSig => &[("Beats", 1, 32, 4), ("Note value", 1, 32, 4)],
+            NewKind::KeySig => &[("Sharps + / flats -", -7, 7, 0), ("Minor (1)", 0, 1, 0)],
             _ => &[],
         }
     }
     /// Auto Step default: notes advance by their gate, others stay (0 clocks).
     pub fn has_text(self) -> bool {
-        matches!(self, NewKind::SysEx | NewKind::Text | NewKind::SeqName | NewKind::InstName | NewKind::Lyric | NewKind::Marker)
+        matches!(self, NewKind::SysEx | NewKind::Text | NewKind::SeqName | NewKind::InstName | NewKind::Lyric | NewKind::Marker | NewKind::Copyright | NewKind::CuePoint)
     }
 
     /// The events this insert creates at `tick` on channel `ch`.
@@ -982,6 +1012,17 @@ impl NewKind {
             NewKind::InstName => meta(0x04),
             NewKind::Lyric => meta(0x05),
             NewKind::Marker => meta(0x06),
+            NewKind::Copyright => meta(0x02),
+            NewKind::CuePoint => meta(0x07),
+            NewKind::Tempo => {
+                let us = (60_000_000.0 / (g(0).clamp(20, 300) as f64)).round() as u32;
+                vec![Event::Meta { t: tick, mtype: 0x51, data: vec![(us >> 16) as u8, (us >> 8) as u8, us as u8] }]
+            }
+            NewKind::TimeSig => {
+                let d = (g(1).clamp(1, 32) as u32).next_power_of_two().min(32);
+                vec![Event::Meta { t: tick, mtype: 0x58, data: vec![g(0).clamp(1, 32) as u8, d.trailing_zeros() as u8, 24, 8] }]
+            }
+            NewKind::KeySig => vec![Event::Meta { t: tick, mtype: 0x59, data: vec![g(0).clamp(-7, 7) as i8 as u8, (g(1) != 0) as u8] }],
         }
     }
 }
@@ -1004,6 +1045,22 @@ pub fn filter_kind(e: &Event) -> usize {
         },
         Event::Sysex { .. } => 6,
         Event::Meta { .. } => 7,
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    #[test]
+    fn master_events() {
+        let e = NewKind::KeySig.build(0, 0, &[-3, 0], "");
+        let e2 = set_value(&e[0], 0, "D Maj", 480).unwrap();
+        assert!(matches!(e2, Event::Meta { mtype: 0x59, ref data, .. } if data[0] == 2 && data[1] == 0));
+        let t = NewKind::Tempo.build(0, 0, &[100], "");
+        assert!(matches!(t[0], Event::Meta { mtype: 0x51, ref data, .. } if data == &vec![0x09, 0x27, 0xC0]));
+        let ts = NewKind::TimeSig.build(0, 0, &[3, 8], "");
+        assert!(matches!(ts[0], Event::Meta { mtype: 0x58, ref data, .. } if data[0] == 3 && data[1] == 3));
     }
 }
 

@@ -81,6 +81,9 @@ struct InsertDlg {
 type Snap = Vec<(usize, Vec<EditNote>, Vec<Event>)>;
 
 pub struct ListState {
+    /// Master Track window (Master.hlp): the master track's meta events
+    /// (tempo, time / key signature, markers, texts), edited like the List.
+    pub master: bool,
     pub spans: Vec<Span>,
     pub target: usize,
     cursor: usize,
@@ -140,6 +143,7 @@ fn span_name(tracks: &[EditTrack], s: Span) -> String {
 impl ListState {
     pub fn new(spans: Vec<Span>) -> Self {
         ListState {
+            master: false,
             spans,
             target: 0,
             cursor: 0,
@@ -170,6 +174,13 @@ impl ListState {
             want: None,
             status: String::new(),
         }
+    }
+
+    pub fn new_master(track: usize) -> Self {
+        let mut st = ListState::new(vec![Span { track, block: None }]);
+        st.master = true;
+        st.hidden = [true, true, true, true, true, true, true, false, true];
+        st
     }
 
     pub fn title(&self, tracks: &[EditTrack]) -> String {
@@ -624,7 +635,8 @@ impl ListState {
             }
             ui.separator();
             ui.menu_button("Insert Event", |ui| {
-                for k in NewKind::ALL {
+                let kinds: &[NewKind] = if self.master { &NewKind::MASTER } else { &NewKind::ALL };
+                for &k in kinds {
                     if ui.button(k.label()).clicked() {
                         cmd = Some(Cmd::Insert(k));
                         ui.close_menu();

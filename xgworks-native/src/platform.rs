@@ -252,8 +252,8 @@ pub fn open_song(slot: &Picked, _ctx: &eframe::egui::Context) {
     }
     if let Some(path) = dlg.pick_file() {
         if let Ok(bytes) = std::fs::read(&path) {
-            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("file").to_string();
-            *slot.borrow_mut() = Some((name, bytes));
+            // the full path: Save writes back to it
+            *slot.borrow_mut() = Some((path.to_string_lossy().into_owned(), bytes));
         }
     }
 }
@@ -333,6 +333,20 @@ pub fn pick_files(slot: &PickedFiles, ctx: &eframe::egui::Context, filter: &str,
 /// Save a song: a save dialog natively, a download on the web.
 /// Returns the status line text.
 #[cfg(not(target_arch = "wasm32"))]
+/// Save As: (status message, the written path).
+pub fn save_song_to(default_name: &str, ext: &str, filter: &str, bytes: &[u8]) -> Option<(String, Option<PathBuf>)> {
+    let mut dlg = rfd::FileDialog::new().set_file_name(default_name).add_filter(filter, &[ext]);
+    if let Some(d) = app_sub("Songs") {
+        dlg = dlg.set_directory(d);
+    }
+    let path = dlg.save_file()?;
+    Some(match std::fs::write(&path, bytes) {
+        Ok(_) => (format!("Saved {} ({} bytes).", path.display(), bytes.len()), Some(path)),
+        Err(e) => (format!("Save failed: {e}"), None),
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn save_song(default_name: &str, ext: &str, filter: &str, bytes: &[u8]) -> Option<String> {
     let mut dlg = rfd::FileDialog::new().set_file_name(default_name).add_filter(filter, &[ext]);
     if let Some(d) = app_sub("Songs") {
@@ -343,6 +357,11 @@ pub fn save_song(default_name: &str, ext: &str, filter: &str, bytes: &[u8]) -> O
         Ok(_) => format!("Saved {} ({} bytes).", path.display(), bytes.len()),
         Err(e) => format!("Save failed: {e}"),
     })
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn save_song_to(default_name: &str, ext: &str, filter: &str, bytes: &[u8]) -> Option<(String, Option<PathBuf>)> {
+    save_song(default_name, ext, filter, bytes).map(|m| (m, None))
 }
 
 #[cfg(target_arch = "wasm32")]

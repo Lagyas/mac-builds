@@ -93,3 +93,39 @@ mod imp {
 }
 
 pub use imp::*;
+
+/// MIDI input (recording, MIDI thru): natively through midir; the browser
+/// build has no input yet.
+#[cfg(not(target_arch = "wasm32"))]
+mod input {
+    use midir::{MidiInput, MidiInputConnection};
+
+    pub fn input_names() -> Vec<String> {
+        let Ok(inp) = MidiInput::new("xgworks-in-list") else { return Vec::new() };
+        inp.ports().iter().map(|p| inp.port_name(p).unwrap_or_else(|_| "?".into())).collect()
+    }
+
+    pub struct InConn(#[allow(dead_code)] MidiInputConnection<()>);
+
+    /// Open input `dev`; `f` gets every message (except clock / active sensing).
+    pub fn connect_input(dev: usize, mut f: impl FnMut(&[u8]) + Send + 'static) -> Option<InConn> {
+        let mut inp = MidiInput::new("xgworks-in").ok()?;
+        inp.ignore(midir::Ignore::TimeAndActiveSense);
+        let ports = inp.ports();
+        let port = ports.get(dev)?;
+        inp.connect(port, "xgworks-in", move |_, msg, _| f(msg), ()).ok().map(InConn)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+mod input {
+    pub fn input_names() -> Vec<String> {
+        Vec::new()
+    }
+    pub struct InConn;
+    pub fn connect_input(_dev: usize, _f: impl FnMut(&[u8]) + Send + 'static) -> Option<InConn> {
+        None
+    }
+}
+
+pub use input::*;
