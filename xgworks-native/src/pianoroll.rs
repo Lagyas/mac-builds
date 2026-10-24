@@ -289,6 +289,9 @@ pub struct RollState {
     pub staff: Option<crate::staff::StaffInfo>,
     /// Staff window: "Print / Export…" was clicked (the app writes the SVG).
     pub export_req: bool,
+    /// Note palette (ShortCut.hlp): length of notes the pencil enters, as
+    /// (quarter-note multiple ×12, so triplets are whole numbers); 0 = the grid.
+    pub note_len: u32,
 }
 
 impl RollState {
@@ -337,6 +340,7 @@ impl RollState {
             drum: None,
             staff: None,
             export_req: false,
+            note_len: 0,
         }
     }
 }
@@ -355,6 +359,39 @@ pub struct RollCtx<'a> {
     /// Play a note of the track for monitoring (note, velocity).
     pub monitor: &'a dyn Fn(u8, u8),
 }
+
+/// The note palette: (label, length in twelfths of a quarter note, key, with Ctrl).
+pub const PALETTE: [(&str, u32, egui::Key, bool); 15] = [
+    ("1", 48, egui::Key::F2, false),
+    ("1/2.", 36, egui::Key::F3, false),
+    ("1/2", 24, egui::Key::F4, false),
+    ("1/4.", 18, egui::Key::F5, false),
+    ("1/4", 12, egui::Key::F6, false),
+    ("1/8.", 9, egui::Key::F7, false),
+    ("1/8", 6, egui::Key::F8, false),
+    ("1/16.", 9 / 2, egui::Key::F9, false),
+    ("1/16", 3, egui::Key::F10, false),
+    ("1/32.", 2, egui::Key::F11, false),
+    ("1/32", 1, egui::Key::F12, false),
+    ("1/2 3", 16, egui::Key::F1, true),
+    ("1/4 3", 8, egui::Key::F2, true),
+    ("1/8 3", 4, egui::Key::F3, true),
+    ("1/16 3", 2, egui::Key::F5, true),
+];
+/// Shift+F2..F12: velocity ppp..fff (List.hlp values).
+const VEL_KEYS: [(egui::Key, u8, &str); 11] = [
+    (egui::Key::F2, 8, "ppp"),
+    (egui::Key::F3, 24, "pp"),
+    (egui::Key::F4, 40, "p"),
+    (egui::Key::F5, 56, "mp"),
+    (egui::Key::F6, 72, "mf"),
+    (egui::Key::F7, 88, "f"),
+    (egui::Key::F8, 104, "ff"),
+    (egui::Key::F9, 120, "fff"),
+    (egui::Key::F10, 127, "fff"),
+    (egui::Key::F11, 127, "fff"),
+    (egui::Key::F12, 127, "fff"),
+];
 
 /// Sort notes by (tick, pitch) and remap the selection to the new order.
 fn sort_notes(notes: &mut Vec<EditNote>, sel: &mut Vec<usize>) {
@@ -729,7 +766,13 @@ impl RollState {
                         let raw = tick_of(pos.x);
                         let st = if step <= 1 { raw } else { raw / step * step };
                         let pitch = rp(pitch_of(pos.y));
-                        let dur = if is_drum { (step.max(ppqn / 4) / 2).max(1) } else { step.max(ppqn / 4) };
+                        let dur = if self.note_len > 0 {
+                            (ppqn * self.note_len / 12).max(1)
+                        } else if is_drum {
+                            (step.max(ppqn / 4) / 2).max(1)
+                        } else {
+                            step.max(ppqn / 4)
+                        };
                         tr.notes.push(EditNote { tick: st, dur, pitch, vel: self.new_vel });
                         (cx.monitor)(pitch, self.new_vel);
                         self.sel = vec![tr.notes.len() - 1];
@@ -766,7 +809,8 @@ impl RollState {
                     (Tool::Pencil, None) if is_drum => self.drag = Drag::Rubber { from: pos },
                     (Tool::Pencil, None) => {
                         let st = if step <= 1 { raw } else { raw / step * step };
-                        self.drag = Drag::Create { pitch: rp(pi), start: st, cur: st + step.max(ppqn / 4) };
+                        let len = if self.note_len > 0 { (ppqn * self.note_len / 12).max(1) } else { step.max(ppqn / 4) };
+                        self.drag = Drag::Create { pitch: rp(pi), start: st, cur: st + len };
                     }
                     (Tool::Select, None) => self.drag = Drag::Rubber { from: pos },
                 }
@@ -858,6 +902,30 @@ impl RollState {
             self.drag = Drag::None;
             if changed {
                 sort_notes(&mut tr.notes, &mut self.sel);
+            }
+        }
+
+        // note palette keys (ShortCut.hlp): F2..F12 length, Ctrl = triplets, Shift = velocity
+        if ui.ctx().input(|i| i.focused) && !ui.ctx().wants_keyboard_input() {
+            for (_, len, key, ctrl) in PALETTE {
+                if ui.input(|i| i.key_pressed(key) && i.modifiers.ctrl == ctrl && !i.modifiers.shift) {
+                    self.note_len = len;
+                }
+            }
+            for (key, vel, _) in VEL_KEYS {
+                if ui.input(|i| i.key_pressed(key) && i.modifiers.shift) {
+                    self.new_vel = vel;
+                    // and the selected notes, like the original (Caps Lock off)
+                    if !self.sel.is_empty() {
+                        self.snapshot(tr);
+                        for &i in &self.sel {
+                            if let Some(n) = tr.notes.get_mut(i) {
+                                n.vel = vel;
+                            }
+                        }
+                        changed = true;
+                    }
+                }
             }
         }
 
@@ -991,7 +1059,7 @@ impl RollState {
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui, cx: &RollCtx) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let name = cx.track_names.get(self.track).cloned().unwrap_or_default();
             let num = cx.visible.iter().position(|&v| v == self.track).map_or(0, |k| k + 1);
             egui::ComboBox::from_id_source(("roll_trk", self as *const _ as usize))
@@ -1027,6 +1095,18 @@ impl RollState {
             }
             if icons::tool_button(ui, icons::ROLL_TOP, 7, self.triplet, "3", "Triplet").clicked() {
                 self.triplet = !self.triplet;
+            }
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.end_row();
+            ui.label(egui::RichText::new("Note").strong()).on_hover_text("Length of the notes the pencil enters (F2–F12, Ctrl = triplets); Grid = the quantize value");
+            if ui.selectable_label(self.note_len == 0, "Grid").on_hover_text("Pencil notes as long as the quantize step").clicked() {
+                self.note_len = 0;
+            }
+            for (label, len, key, ctrl) in PALETTE {
+                let tip = format!("{}{:?}", if ctrl { "Ctrl+" } else { "" }, key);
+                if ui.selectable_label(self.note_len == len, label).on_hover_text(tip).clicked() {
+                    self.note_len = len;
+                }
             }
             if self.staff.is_some() {
                 ui.spacing_mut().item_spacing.x = 8.0;

@@ -95,10 +95,21 @@ pub enum Vk {
     Markers,
     Line,
     Free,
+    New,
+    Open,
+    Save,
+    Undo,
+    Redo,
+    Transport,
 }
 
 fn vector_kind(id: u32, idx: usize) -> Option<Vk> {
     match (id, idx) {
+        (MAIN_BAR, 0) => Some(Vk::New),
+        (MAIN_BAR, 1) => Some(Vk::Open),
+        (MAIN_BAR, 2) => Some(Vk::Save),
+        (MAIN_BAR, 3) => Some(Vk::Undo),
+        (MAIN_BAR, 4) => Some(Vk::Redo),
         (MAIN_BAR, 5) | (ROLL_TOOLS, 0) => Some(Vk::Arrow),
         (MAIN_BAR, 6) | (ROLL_TOOLS, 1) => Some(Vk::Pencil),
         (MAIN_BAR, 7) | (ROLL_TOOLS, 2) => Some(Vk::Eraser),
@@ -205,6 +216,37 @@ pub fn vector_icon(p: &egui::Painter, r: Rect, k: Vk) {
         }
         Vk::Line => {
             p.line_segment([at(1.0, 14.0), at(15.0, 2.0)], Stroke::new(1.5_f32, blk));
+        }
+        Vk::New => {
+            p.add(egui::Shape::convex_polygon(vec![at(3.0, 1.0), at(10.0, 1.0), at(13.0, 4.0), at(13.0, 15.0), at(3.0, 15.0)], Color32::WHITE, s1));
+            p.line_segment([at(10.0, 1.0), at(10.0, 4.0)], s1);
+            p.line_segment([at(10.0, 4.0), at(13.0, 4.0)], s1);
+        }
+        Vk::Open => {
+            p.rect_filled(Rect::from_min_max(at(1.0, 4.0), at(12.0, 14.0)), 1.0, Color32::from_rgb(230, 190, 70));
+            p.add(egui::Shape::convex_polygon(vec![at(3.0, 7.0), at(15.0, 7.0), at(12.0, 14.0), at(1.0, 14.0)], Color32::from_rgb(250, 220, 110), s1));
+            p.line_segment([at(9.0, 1.0), at(13.0, 3.5)], Stroke::new(1.5_f32, Color32::from_rgb(0, 120, 0)));
+        }
+        Vk::Save => {
+            p.rect_filled(Rect::from_min_max(at(1.0, 1.0), at(15.0, 15.0)), 1.5, Color32::from_rgb(40, 60, 140));
+            p.rect_filled(Rect::from_min_max(at(4.0, 1.0), at(12.0, 6.0)), 0.0, Color32::from_gray(225));
+            p.rect_filled(Rect::from_min_max(at(4.0, 9.0), at(12.0, 15.0)), 0.0, Color32::WHITE);
+        }
+        Vk::Undo | Vk::Redo => {
+            let d = if k == Vk::Undo { 1.0 } else { -1.0 };
+            let cx = 8.0;
+            let pts: Vec<egui::Pos2> = (0..=12)
+                .map(|i| {
+                    let a = std::f32::consts::PI * (i as f32 / 12.0);
+                    at(cx - d * 5.0 * a.cos(), 9.0 - 5.0 * a.sin())
+                })
+                .collect();
+            p.add(egui::Shape::line(pts, Stroke::new(2.0_f32, Color32::from_rgb(20, 60, 160))));
+            let tip = at(cx - d * 5.0, 9.0);
+            p.add(egui::Shape::convex_polygon(vec![tip + vec2(-3.5, -1.0), tip + vec2(3.5, -1.0), tip + vec2(0.0, 4.0)], Color32::from_rgb(20, 60, 160), Stroke::NONE));
+        }
+        Vk::Transport => {
+            p.add(egui::Shape::convex_polygon(vec![at(4.0, 2.0), at(14.0, 8.0), at(4.0, 14.0)], Color32::from_rgb(30, 140, 50), Stroke::NONE));
         }
         Vk::Free => {
             let pts: Vec<egui::Pos2> = (0..=16).map(|i| at(i as f32, 8.0 + 5.0 * (i as f32 * 0.6).sin())).collect();

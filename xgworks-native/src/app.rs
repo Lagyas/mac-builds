@@ -76,7 +76,13 @@ fn apply_args(app: &mut App, args: &[String]) {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn native_main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title(crate::version::title()).with_inner_size([1000.0, 640.0]),
+        viewport: {
+            let vb = egui::ViewportBuilder::default().with_title(crate::version::title()).with_inner_size([1000.0, 640.0]);
+            match eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon_256.png")) {
+                Ok(icon) => vb.with_icon(icon),
+                Err(_) => vb,
+            }
+        },
         ..Default::default()
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -766,45 +772,32 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
 
-        egui::TopBottomPanel::top("bar").show(ctx, |ui| {
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                self.file_menu(ui);
-                if ui.button("Open").on_hover_text("Open (Ctrl+O)").clicked() {
-                    let c = ui.ctx().clone();
-                    self.file_command(fileops::After::Open, &c);
-                }
+        // menu bar, icon tool bar, editors bar (XGworks' layout, Cubase-like look)
+        egui::TopBottomPanel::top("menubar").show(ctx, |ui| {
+            egui::menu::bar(ui, |ui| {
                 let has = !self.edit.is_empty();
-                if ui.add_enabled(has, egui::Button::new("Save")).on_hover_text("Save (Ctrl+S)").clicked() {
-                    self.save_current();
-                }
-                ui.separator();
-                // Track View edit tools, with the original's toolbar icons
-                ui.spacing_mut().item_spacing.x = 0.0;
-                for (k, (t, name, tip)) in TV_TOOLS.into_iter().enumerate() {
-                    if icons::tool_button(ui, icons::MAIN_BAR, 5 + k, self.tv_tool == t, name, tip).clicked() {
-                        self.tv_tool = t;
-                        self.bond_first = None;
+                self.file_menu(ui);
+                ui.menu_button("Edit", |ui| {
+                    if ui.add_enabled(!self.tv_undo.is_empty(), egui::Button::new("Undo                   Ctrl+Z")).clicked() {
+                        self.tv_undo_redo(true);
+                        ui.close_menu();
                     }
-                }
-                ui.spacing_mut().item_spacing.x = 8.0;
-                ui.separator();
-                egui::ComboBox::from_id_source("out")
-                    .selected_text(self.out_names.get(self.sel_out).cloned().unwrap_or_else(|| "— no output —".into()))
-                    .show_ui(ui, |ui| {
-                        for (i, n) in self.out_names.iter().enumerate() {
-                            ui.selectable_value(&mut self.sel_out, i, n);
-                        }
-                    });
-                if ui.button("⟳").on_hover_text("Refresh outputs").clicked() {
-                    self.refresh_outputs();
-                }
-                ui.separator();
-                if ui.add(egui::Button::new(egui::RichText::new("▶ Transport").strong())).on_hover_text("Show / hide the Transport window (Alt+F7)").clicked() {
-                    self.show_transport = !self.show_transport;
-                }
-                ui.end_row();
-                ui.separator();
+                    if ui.add_enabled(!self.tv_redo.is_empty(), egui::Button::new("Redo                   Ctrl+Y")).clicked() {
+                        self.tv_undo_redo(false);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.add_enabled(has, egui::Button::new("Insert Chord…")).on_hover_text("XF chord at the song position (or click the C lane with the pencil)").clicked() {
+                        let t = self.cur_tick();
+                        self.open_chord_dialog(t);
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(has, egui::Button::new("Add Marker / Marker List…")).clicked() {
+                        self.markers_win.get_or_insert_with(markerwin::MarkerState::new);
+                        ui.close_menu();
+                    }
+                });
+                self.setup_menu(ui);
                 ui.add_enabled_ui(has, |ui| {
                     ui.menu_button("Job", |ui| {
                         for (j, label) in jobwin::JOB_MENU {
@@ -830,27 +823,6 @@ impl eframe::App for App {
                         ui.close_menu();
                     }
                 });
-                ui.menu_button("Edit", |ui| {
-                    if ui.add_enabled(!self.tv_undo.is_empty(), egui::Button::new("Undo                   Ctrl+Z")).clicked() {
-                        self.tv_undo_redo(true);
-                        ui.close_menu();
-                    }
-                    if ui.add_enabled(!self.tv_redo.is_empty(), egui::Button::new("Redo                   Ctrl+Y")).clicked() {
-                        self.tv_undo_redo(false);
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.add_enabled(has, egui::Button::new("Insert Chord…")).on_hover_text("XF chord at the song position (or click the C lane with the pencil)").clicked() {
-                        let t = self.cur_tick();
-                        self.open_chord_dialog(t);
-                        ui.close_menu();
-                    }
-                    if ui.add_enabled(has, egui::Button::new("Add Marker / Marker List…")).clicked() {
-                        self.markers_win.get_or_insert_with(markerwin::MarkerState::new);
-                        ui.close_menu();
-                    }
-                });
-                self.setup_menu(ui);
                 ui.menu_button("Window", |ui| {
                     let t = self.sel_track;
                     let has_t = t < self.edit.len();
@@ -894,9 +866,6 @@ impl eframe::App for App {
                     ui.separator();
                     ui.label(egui::RichText::new("For the track selected in the Track View").small());
                 });
-                if ui.button("⚙").on_hover_text("Preferences").clicked() {
-                    self.show_prefs = true;
-                }
                 ui.menu_button("Help", |ui| {
                     ui.label(egui::RichText::new(crate::version::about()).monospace());
                     ui.separator();
@@ -905,10 +874,63 @@ impl eframe::App for App {
                         ui.close_menu();
                     }
                 });
-                ui.end_row();
-                self.editors_bar(ui);
             });
-            ui.add_space(4.0);
+        });
+        egui::TopBottomPanel::top("bar").frame(egui::Frame::default().fill(Color32::from_gray(232)).inner_margin(egui::Margin::symmetric(6.0, 4.0))).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                let has = !self.edit.is_empty();
+                ui.spacing_mut().item_spacing.x = 0.0;
+                // file / undo, original icons (bitmap 2003: new, open, save, undo, redo)
+                let c = ui.ctx().clone();
+                if icons::tool_button(ui, icons::MAIN_BAR, 0, false, "New", "New (Ctrl+N)").clicked() {
+                    self.file_command(fileops::After::New, &c);
+                }
+                if icons::tool_button(ui, icons::MAIN_BAR, 1, false, "Open", "Open (Ctrl+O)").clicked() {
+                    self.file_command(fileops::After::Open, &c);
+                }
+                if icons::tool_button(ui, icons::MAIN_BAR, 2, false, "Save", "Save (Ctrl+S)").clicked() && has {
+                    self.save_current();
+                }
+                ui.add_space(8.0);
+                if icons::tool_button(ui, icons::MAIN_BAR, 3, false, "Undo", "Undo (Ctrl+Z)").clicked() {
+                    self.tv_undo_redo(true);
+                }
+                if icons::tool_button(ui, icons::MAIN_BAR, 4, false, "Redo", "Redo (Ctrl+Y)").clicked() {
+                    self.tv_undo_redo(false);
+                }
+                ui.add_space(8.0);
+                // Track View edit tools
+                for (k, (t, name, tip)) in TV_TOOLS.into_iter().enumerate() {
+                    if icons::tool_button(ui, icons::MAIN_BAR, 5 + k, self.tv_tool == t, name, tip).clicked() {
+                        self.tv_tool = t;
+                        self.bond_first = None;
+                    }
+                }
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.add_space(8.0);
+                ui.separator();
+                ui.label(egui::RichText::new("MIDI Out").strong());
+                egui::ComboBox::from_id_source("out")
+                    .width(200.0)
+                    .selected_text(self.out_names.get(self.sel_out).cloned().unwrap_or_else(|| "— no output —".into()))
+                    .show_ui(ui, |ui| {
+                        for (i, n) in self.out_names.iter().enumerate() {
+                            ui.selectable_value(&mut self.sel_out, i, n);
+                        }
+                    });
+                if ui.button("⟳").on_hover_text("Refresh outputs").clicked() {
+                    self.refresh_outputs();
+                }
+                ui.separator();
+                if icons::editor_button(ui, None, icons::Vk::Transport, "Transport", self.show_transport, "Show / hide the Transport window (Alt+F7)").clicked() {
+                    self.show_transport = !self.show_transport;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new(self.loc_label(self.cur_tick())).monospace().size(15.0).strong());
+                });
+            });
+            ui.add_space(3.0);
+            ui.horizontal_wrapped(|ui| self.editors_bar(ui));
         });
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {

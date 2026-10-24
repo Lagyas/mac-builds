@@ -154,24 +154,49 @@ pub fn assign(track: &mut EditTrack, starts: &[u32], syls: &[String], enc: Enc, 
 }
 
 /// One karaoke page around `tick`: lines of (syllable, already sung).
+/// Line / page marks of one syllable: (starts a new line, starts a new
+/// page, ends its line, ends its page, the text without marks). Understands
+/// XF ("/" line, "<" page, at the start) and .kar files ("/" or "\\" at the
+/// start, CR / LF anywhere, "/" at the end).
+fn marks(s: &str) -> (bool, bool, bool, bool, String) {
+    let new_page = s.starts_with('<') || s.starts_with('\\');
+    let new_line = s.starts_with('/') || new_page;
+    let t = s.trim_start_matches(['/', '<', '\\']);
+    let end_page = t.ends_with("\r\n\r\n") || t.ends_with("\n\n");
+    let end_line = t.ends_with('\r') || t.ends_with('\n') || t.ends_with('/') || end_page;
+    let text: String = t.trim_end_matches(['\r', '\n', '/']).replace(['\r', '\n'], " ");
+    (new_line, new_page, end_line, end_page, text)
+}
+
+/// One karaoke page around `tick`: lines of (syllable, already sung).
 fn page_at(items: &[(u32, String)], tick: u32) -> Vec<Vec<(String, bool)>> {
     if items.is_empty() {
         return Vec::new();
     }
-    let cur = items.iter().rposition(|x| x.0 <= tick).unwrap_or(0);
-    let is_page = |s: &str| s.starts_with('<') || s.starts_with('\\');
-    let start = (0..=cur).rev().find(|&i| is_page(&items[i].1)).unwrap_or(0);
-    let end = (cur + 1..items.len()).find(|&i| is_page(&items[i].1)).unwrap_or(items.len());
-    let mut lines: Vec<Vec<(String, bool)>> = vec![Vec::new()];
-    for (i, (t, s)) in items.iter().enumerate().take(end).skip(start) {
-        let mut text = s.as_str();
-        if i > start && text.starts_with('/') {
-            lines.push(Vec::new());
+    // all pages, built from the marks
+    let mut pages: Vec<Vec<Vec<(u32, String)>>> = vec![vec![Vec::new()]];
+    let mut break_line = false;
+    let mut break_page = false;
+    for (t, raw) in items {
+        let (nl, np, el, ep, text) = marks(raw);
+        if (np || break_page) && pages.last().is_some_and(|p| p.iter().any(|l| !l.is_empty())) {
+            pages.push(vec![Vec::new()]);
+        } else if (nl || break_line) && pages.last().and_then(|p| p.last()).is_some_and(|l| !l.is_empty()) {
+            pages.last_mut().unwrap().push(Vec::new());
         }
-        text = text.trim_start_matches(['/', '<', '\\']);
-        lines.last_mut().unwrap().push((text.to_string(), *t <= tick));
+        pages.last_mut().unwrap().last_mut().unwrap().push((*t, text));
+        break_line = el;
+        break_page = ep;
     }
-    lines
+    // the page that holds the last syllable at / before `tick`
+    let page = pages
+        .iter()
+        .rev()
+        .find(|p| p.iter().flatten().any(|(t, _)| *t <= tick))
+        .or(pages.first())
+        .cloned()
+        .unwrap_or_default();
+    page.into_iter().filter(|l| !l.is_empty()).map(|l| l.into_iter().map(|(t, s)| (s, t <= tick)).collect()).collect()
 }
 
 pub enum LyricAction {
@@ -344,22 +369,44 @@ impl LyricsState {
             // ---- karaoke preview + assign
             let ui = &mut cols[1];
             ui.label(egui::RichText::new("Karaoke preview").strong());
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 150.0), egui::Sense::hover());
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 170.0), egui::Sense::hover());
             let p = ui.painter_at(rect);
             p.rect_filled(rect, 4.0, Color32::from_rgb(16, 20, 40));
-            let mut y = rect.top() + 14.0;
             let page = page_at(&texts, if playing || song_pos > 0 { song_pos } else { 0 });
             if page.is_empty() {
-                p.text(rect.left_top() + egui::vec2(12.0, 20.0), egui::Align2::LEFT_CENTER, "No lyrics on this track.", egui::FontId::proportional(14.0), Color32::from_gray(150));
+                p.text(rect.center(), egui::Align2::CENTER_CENTER, "No lyrics on this track.", egui::FontId::proportional(14.0), Color32::from_gray(150));
             }
-            for line in page.iter().take(5) {
-                let mut x = rect.left() + 12.0;
+            // lines centred; a line wider than the box wraps between syllables
+            let font = egui::FontId::proportional(20.0);
+            let max_w = rect.width() - 24.0;
+            let mut rows: Vec<Vec<(std::sync::Arc<egui::Galley>, bool)>> = Vec::new();
+            for line in &page {
+                let mut row: Vec<(std::sync::Arc<egui::Galley>, bool)> = Vec::new();
+                let mut w = 0.0;
                 for (s, sung) in line {
-                    let col = if *sung { Color32::from_rgb(255, 200, 40) } else { Color32::WHITE };
-                    let r = p.text(egui::pos2(x, y), egui::Align2::LEFT_TOP, s, egui::FontId::proportional(20.0), col);
-                    x = r.right();
+                    let g = p.layout_no_wrap(s.clone(), font.clone(), Color32::WHITE);
+                    let gw = g.size().x;
+                    if w + gw > max_w && !row.is_empty() {
+                        rows.push(std::mem::take(&mut row));
+                        w = 0.0;
+                    }
+                    w += gw;
+                    row.push((g, *sung));
                 }
-                y += 26.0;
+                rows.push(row);
+            }
+            let line_h = 27.0;
+            let shown = rows.len().min(6);
+            let mut y = rect.center().y - shown as f32 * line_h / 2.0;
+            for row in rows.iter().take(shown) {
+                let w: f32 = row.iter().map(|(g, _)| g.size().x).sum();
+                let mut x = rect.center().x - w / 2.0;
+                for (g, sung) in row {
+                    let col = if *sung { Color32::from_rgb(255, 200, 40) } else { Color32::WHITE };
+                    p.galley_with_override_text_color(egui::pos2(x, y), g.clone(), col);
+                    x += g.size().x;
+                }
+                y += line_h;
             }
             ui.add_space(6.0);
             ui.separator();
@@ -655,5 +702,11 @@ mod tests {
         let page = page_at(&[(0, "a ".into()), (10, "/b ".into()), (20, "<c ".into())], 12);
         assert_eq!(page.len(), 2);
         assert!(page[1][0].1);
+        // .kar style: CR at the end of a line, "\\" new page
+        let kar = [(0, "Ahoj ".to_string()), (5, "sve\r".to_string()), (10, "te ".to_string()), (20, "\\dal".to_string())];
+        let p2 = page_at(&kar, 12);
+        assert_eq!(p2.len(), 2, "{p2:?}");
+        assert_eq!(p2[0][1].0, "sve");
+        assert_eq!(page_at(&kar, 25).len(), 1);
     }
 }

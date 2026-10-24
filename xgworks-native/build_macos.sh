@@ -27,12 +27,21 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleExecutable</key><string>xgworks-native</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>
 PLIST
+# app icon (assets/icon_1024.png -> AppIcon.icns)
+ICONSET=target/AppIcon.iconset
+rm -rf "$ICONSET"; mkdir -p "$ICONSET"
+for s in 16 32 128 256 512; do
+  sips -z $s $s assets/icon_1024.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+  d=$((s * 2)); sips -z $d $d assets/icon_1024.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+done
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 # ad-hoc signature so Gatekeeper lets a locally built app start
 codesign --force --deep -s - "$APP"
 # The app's folder: everything it needs sits next to it (found automatically).
