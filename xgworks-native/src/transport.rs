@@ -125,6 +125,7 @@ impl App {
     }
 
     /// Toolbar: Top / Play / Stop / Loop, location, L / R locators.
+    #[allow(dead_code)]
     pub(super) fn transport_bar(&mut self, ui: &mut egui::Ui) {
         let has = !self.edit.is_empty();
         if ui.add_enabled(has, egui::Button::new("⏮")).on_hover_text("To the song start (numpad 0)").clicked() {
@@ -212,8 +213,8 @@ impl App {
         if !self.show_prefs {
             return;
         }
-        let mut open = true;
-        egui::Window::new("Preferences").open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
+        // its own window (can be moved outside the main window)
+        let open = super::sub_window(ctx, "prefs", "Preferences", [640.0, 420.0], |ui| {
             egui::Grid::new("prefs").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                 ui.label("Numpad 2 jumps back");
                 ui.add(egui::Slider::new(&mut self.rewind_bars, 2..=4).suffix(" bars"));
@@ -248,7 +249,11 @@ impl App {
                     ui.end_row();
                 }
             });
-            ui.label(egui::RichText::new("Keys: Space play/stop · numpad 0 start · 1 L · 3 R · 2 back · − loop").small());
+            if !crate::platform::xg4_found() {
+                ui.separator();
+                ui.label(egui::RichText::new(crate::platform::data_help("XGworks data not found.")).color(egui::Color32::from_rgb(200, 60, 0)));
+            }
+            ui.label(egui::RichText::new("Keys: Space play/stop · numpad 0 start · 1 L · 3 R · 2 back · − loop · + REC").small());
         });
         self.show_prefs = open;
     }

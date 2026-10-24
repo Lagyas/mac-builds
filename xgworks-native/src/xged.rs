@@ -73,7 +73,7 @@ impl XgEditor {
                 self.load_model();
             }
             None => {
-                self.error = format!("xgeditor.ini not found in {} — choose your XGworks V4.0 folder in Preferences (⚙), then restart.", self.data_dir.display());
+                self.error = crate::platform::data_help(&format!("XG Editor: xgeditor.ini not found in {}.", self.data_dir.display()));
             }
         }
     }

@@ -7,6 +7,8 @@
 //! joined. Text is stored in the chosen 8-bit code page (default
 //! Windows-1250, like XGW Next).
 
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
+
 use eframe::egui::{self, Color32};
 use xgworks_core::listev::TimeMap;
 use xgworks_core::{EditTrack, Event};
@@ -196,7 +198,8 @@ impl LyricsState {
     }
 
     /// `visible` = track indices shown (display number = position + 1).
-    pub fn ui(&mut self, ui: &mut egui::Ui, tracks: &[EditTrack], visible: &[usize], tm: &TimeMap, song_pos: u32, playing: bool) -> Vec<LyricAction> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn ui(&mut self, ui: &mut egui::Ui, tracks: &[EditTrack], visible: &[usize], tm: &TimeMap, song_pos: u32, playing: bool, master: usize, file_name: &str) -> Vec<LyricAction> {
         let mut out = Vec::new();
         if tracks.is_empty() {
             ui.label("Open a song first.");
@@ -234,7 +237,7 @@ impl LyricsState {
             let ui = &mut cols[0];
             ui.horizontal(|ui| {
                 if ui.button("Insert at song position").clicked() {
-                    let (enc, txt) = (self.enc, if self.edit_text.is_empty() { "la ".to_string() } else { self.edit_text.clone() });
+                    let (enc, txt) = (self.enc, if self.edit_text.is_empty() { "la ".to_string() } else { from_shown(&self.edit_text) });
                     out.push(LyricAction::Edit(Box::new(move |tr| tr[ti].others.push(Event::Meta { t: song_pos, mtype: LYRIC, data: enc.encode(&txt) }))));
                 }
                 let sel = self.sel.and_then(|k| items.get(k).map(|x| x.1));
@@ -257,10 +260,13 @@ impl LyricsState {
             ui.horizontal(|ui| {
                 ui.label("Text");
                 let r = ui.add(egui::TextEdit::singleline(&mut self.edit_text).desired_width(180.0).hint_text("/ = new line, < = new page"));
+                if r.changed() {
+                    self.edit_text = to_shown(&from_shown(&self.edit_text)); // a typed space shows as ·
+                }
                 let sel = self.sel.and_then(|k| items.get(k).map(|x| x.1));
                 let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if ui.add_enabled(sel.is_some(), egui::Button::new("Apply")).clicked() || (enter && sel.is_some()) {
-                    let (idx, enc, txt) = (sel.unwrap(), self.enc, self.edit_text.clone());
+                    let (idx, enc, txt) = (sel.unwrap(), self.enc, from_shown(&self.edit_text));
                     out.push(LyricAction::Edit(Box::new(move |tr| {
                         if let Some(Event::Meta { data, .. }) = tr[ti].others.get_mut(idx) {
                             *data = enc.encode(&txt);
@@ -268,18 +274,64 @@ impl LyricsState {
                     })));
                 }
             });
-            ui.label(egui::RichText::new(format!("{} lyric events · click = select · double-click = song position", items.len())).small());
+            #[cfg(target_arch = "wasm32")]
+            let _ = (master, file_name);
+            #[cfg(not(target_arch = "wasm32"))]
+            ui.horizontal(|ui| {
+                {
+                    if ui.button("Export .lyrics…").on_hover_text("Lyrics (this track) and XF chords as text with bar:beat:tick (Midimusic Chord and Lyrics Protocol, Windows-1250)").clicked() {
+                        let text = export_text(tracks, ti, tm, self.enc, file_name);
+                        let stem = std::path::Path::new(file_name).file_stem().and_then(|x| x.to_str()).unwrap_or("song").to_string();
+                        let mut dlg = rfd::FileDialog::new().set_file_name(format!("{stem}.lyrics")).add_filter("Lyrics", &["lyrics", "txt"]);
+                        if let Some(d) = crate::platform::app_sub("Songs") {
+                            dlg = dlg.set_directory(d);
+                        }
+                        if let Some(path) = dlg.save_file() {
+                            out.push(LyricAction::Status(match std::fs::write(&path, Enc::Cp1250.encode(&text)) {
+                                Ok(_) => format!("Exported to {}.", path.display()),
+                                Err(e) => format!("Export failed: {e}"),
+                            }));
+                        }
+                    }
+                    if ui.button("Import .lyrics…").on_hover_text("Replace this track's lyrics (and the XF chords, when the file has Chd lines) from an edited .lyrics / .txt file").clicked() {
+                        let mut dlg = rfd::FileDialog::new().add_filter("Lyrics", &["lyrics", "txt"]);
+                        if let Some(d) = crate::platform::app_sub("Songs") {
+                            dlg = dlg.set_directory(d);
+                        }
+                        if let Some(path) = dlg.pick_file() {
+                            match std::fs::read(&path) {
+                                Ok(bytes) => {
+                                    let (lyr, chd, bad) = parse_text(&Enc::Cp1250.decode(&bytes), tm);
+                                    if lyr.is_empty() && chd.is_empty() {
+                                        out.push(LyricAction::Status("No Lyr / Chd lines in that file.".into()));
+                                    } else {
+                                        let (nl, nc, enc) = (lyr.len(), chd.len(), self.enc);
+                                        out.push(LyricAction::Edit(Box::new(move |tr| apply_import(tr, ti, master, &lyr, &chd, enc))));
+                                        out.push(LyricAction::Status(format!(
+                                            "Imported {nl} lyrics{}{} (undo with Ctrl+Z).",
+                                            if nc > 0 { format!(" and {nc} chords") } else { String::new() },
+                                            if bad > 0 { format!("; {bad} lines not understood") } else { String::new() }
+                                        )));
+                                    }
+                                }
+                                Err(e) => out.push(LyricAction::Status(format!("Import failed: {e}"))),
+                            }
+                        }
+                    }
+                }
+            });
+            ui.label(egui::RichText::new(format!("{} lyric events · click = select · double-click = song position · · = space", items.len())).small());
             egui::ScrollArea::vertical().id_source("lyr_list").max_height(ui.available_height() - 4.0).show(ui, |ui| {
                 egui::Grid::new("lyr_grid").striped(true).num_columns(2).show(ui, |ui| {
                     for (k, (t, s)) in texts.iter().enumerate() {
                         let (m, b, c) = tm.to_mbc(*t);
                         let pos = format!("{m:04}:{b}:{c:03}");
                         let r1 = ui.selectable_label(self.sel == Some(k), egui::RichText::new(pos).monospace());
-                        let r2 = ui.selectable_label(self.sel == Some(k), format!("\"{s}\""));
+                        let r2 = ui.selectable_label(self.sel == Some(k), shown_job(s, ui.visuals().text_color()));
                         let r = r1.union(r2);
                         if r.clicked() {
                             self.sel = Some(k);
-                            self.edit_text = s.clone();
+                            self.edit_text = to_shown(s);
                         }
                         if r.double_clicked() {
                             out.push(LyricAction::Locate(*t));
@@ -356,6 +408,179 @@ impl LyricsState {
     }
 }
 
+/// Spaces made visible for editing: "·" (not stored, the karaoke shows spaces).
+pub fn to_shown(s: &str) -> String {
+    s.replace(' ', "\u{00B7}")
+}
+
+pub fn from_shown(s: &str) -> String {
+    s.replace('\u{00B7}', " ")
+}
+
+/// A lyric for the list: in quotes, spaces as small grey dots.
+fn shown_job(s: &str, col: Color32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    let fmt = |c: Color32| egui::TextFormat { color: c, ..Default::default() };
+    job.append("\"", 0.0, fmt(Color32::GRAY));
+    for ch in s.chars() {
+        if ch == ' ' {
+            job.append("\u{00B7}", 0.0, fmt(Color32::from_gray(150)));
+        } else {
+            job.append(&ch.to_string(), 0.0, fmt(col));
+        }
+    }
+    job.append("\"", 0.0, fmt(Color32::GRAY));
+    job
+}
+
+// ---------------------------------------------------------------------------
+// Text export / import: "Midimusic Chord and Lyrics Protocol" (as the
+// user's midi-file-editor): header, then one line per lyric / chord,
+//   Lyr<TAB>bbb:bb:ttt<TAB>"text"      Chd<TAB>bbb:bb:ttt<TAB>Am7/D
+// between [start chords+lyrics] and [end list], Windows-1250, CRLF.
+// ---------------------------------------------------------------------------
+
+const XF_TYPES: [&str; 34] = [
+    "", "6", "maj7", "maj7(#11)", "add9", "maj7(9)", "6(9)", "aug", "m", "m6", "m7", "m7(b5)", "m(9)", "m7(9)", "m7(11)", "mMaj7",
+    "mMaj7(9)", "dim", "dim7", "7", "7sus4", "7(b5)", "7(9)", "7(#11)", "7(13)", "7(b9)", "7(b13)", "7(#9)", "maj7aug", "7aug", "1+8",
+    "1+5", "sus4", "1+2+5",
+];
+const LETTERS: [char; 7] = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
+const ACC: [&str; 7] = ["bbb", "bb", "b", "", "#", "##", "###"];
+
+fn xf_root(b: u8) -> Option<String> {
+    let (n, f) = ((b & 0x0F) as usize, ((b >> 4) & 7) as usize);
+    (b != 0x7F && (1..=7).contains(&n) && f <= 6).then(|| format!("{}{}", LETTERS[n - 1], ACC[f]))
+}
+
+fn xf_root_byte(name: &str) -> Option<u8> {
+    let mut c = name.chars();
+    let l = c.next()?.to_ascii_uppercase();
+    let n = LETTERS.iter().position(|&x| x == l)? as u8 + 1;
+    let acc: String = c.collect();
+    let f = match acc.as_str() {
+        "" => 3,
+        "#" => 4,
+        "##" => 5,
+        "b" => 2,
+        "bb" => 1,
+        _ => return None,
+    };
+    Some(f << 4 | n)
+}
+
+/// "Am7/D" of an XF chord meta (FF 7F 43 7B 01 cr ct bn bt).
+pub fn xf_chord_name(d: &[u8]) -> Option<String> {
+    if d.len() != 7 || d[..3] != [0x43, 0x7B, 0x01] {
+        return None;
+    }
+    if d[3] == 0x7F {
+        return Some("N.C.".into());
+    }
+    let mut s = xf_root(d[3])? + XF_TYPES.get(d[4] as usize).copied().unwrap_or("");
+    if d[5] != 0x7F {
+        s += &format!("/{}", xf_root(d[5])?);
+    }
+    Some(s)
+}
+
+/// Chord name → XF chord data (7 bytes after FF 7F len).
+pub fn xf_chord_data(name: &str) -> Option<Vec<u8>> {
+    let t = name.trim();
+    if t.eq_ignore_ascii_case("N.C.") || t.eq_ignore_ascii_case("NC") {
+        return Some(vec![0x43, 0x7B, 0x01, 0x7F, 0, 0x7F, 0x7F]);
+    }
+    let (main, bass) = match t.split_once('/') {
+        Some((m, b)) => (m, Some(b)),
+        None => (t, None),
+    };
+    let rl = main.chars().take(1).count() + main.chars().nth(1).filter(|c| *c == '#' || *c == 'b').map_or(0, |_| 1);
+    let root: String = main.chars().take(rl).collect();
+    let cr = xf_root_byte(&root)?;
+    let suffix: String = main.chars().skip(rl).collect();
+    let ct = XF_TYPES.iter().position(|x| *x == suffix)? as u8;
+    let (bn, bt) = match bass {
+        Some(b) => (xf_root_byte(b.trim())?, 0),
+        None => (0x7F, 0x7F),
+    };
+    Some(vec![0x43, 0x7B, 0x01, cr, ct, bn, bt])
+}
+
+fn pos3(tm: &TimeMap, t: u32) -> String {
+    let (m, b, c) = tm.to_mbc(t);
+    format!("{m:03}:{b:02}:{c:03}")
+}
+
+/// The export text (lyrics of `track`, XF chords of the whole song).
+pub fn export_text(tracks: &[EditTrack], track: usize, tm: &TimeMap, enc: Enc, file: &str) -> String {
+    let mut rows: Vec<(u32, String)> = lyrics(&tracks[track])
+        .into_iter()
+        .map(|(t, _, d)| (t, format!("Lyr\t{}\t\"{}\"", pos3(tm, t), enc.decode(&d).replace(['\r', '\n'], " "))))
+        .collect();
+    for tr in tracks {
+        for e in &tr.others {
+            if let Event::Meta { t, mtype: 0x7F, data } = e {
+                if let Some(c) = xf_chord_name(data) {
+                    rows.push((*t, format!("Chd\t{}\t{c}", pos3(tm, *t))));
+                }
+            }
+        }
+    }
+    rows.sort_by_key(|r| r.0);
+    let mut out = vec!["Midimusic Chord and Lyrics Protocol".to_string(), format!("File:  {file}"), String::new(), "[start chords+lyrics]".into()];
+    out.extend(rows.into_iter().map(|r| r.1));
+    out.push("[end list]".into());
+    out.push(String::new());
+    out.join("\r\n")
+}
+
+/// (lyrics (tick, text), chords (tick, xf data), lines not understood).
+pub fn parse_text(text: &str, tm: &TimeMap) -> (Vec<(u32, String)>, Vec<(u32, Vec<u8>)>, usize) {
+    let (mut lyr, mut chd, mut bad) = (Vec::new(), Vec::new(), 0);
+    let pos = |p: &str| -> Option<u32> {
+        let v: Vec<u32> = p.split(':').map(|x| x.trim().parse().ok()).collect::<Option<Vec<_>>>()?;
+        (v.len() == 3).then(|| tm.from_mbc(v[0], v[1], v[2]))
+    };
+    for line in text.lines() {
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
+        if parts.len() != 3 {
+            continue;
+        }
+        match (parts[0], pos(parts[1])) {
+            ("Lyr", Some(t)) => {
+                let s = parts[2].trim_end();
+                let s = s.strip_prefix('"').and_then(|x| x.strip_suffix('"')).unwrap_or(s);
+                lyr.push((t, s.to_string()));
+            }
+            ("Chd", Some(t)) => match xf_chord_data(parts[2]) {
+                Some(d) => chd.push((t, d)),
+                None => bad += 1,
+            },
+            ("Lyr", None) | ("Chd", None) => bad += 1,
+            _ => {}
+        }
+    }
+    (lyr, chd, bad)
+}
+
+/// Replace the lyrics of `track` (and, when given, the song's XF chords, put on `master`).
+pub fn apply_import(tr: &mut [EditTrack], track: usize, master: usize, lyr: &[(u32, String)], chd: &[(u32, Vec<u8>)], enc: Enc) {
+    if !lyr.is_empty() {
+        tr[track].others.retain(|e| !matches!(e, Event::Meta { mtype: LYRIC, .. }));
+        for (t, s) in lyr {
+            tr[track].others.push(Event::Meta { t: *t, mtype: LYRIC, data: enc.encode(s) });
+        }
+    }
+    if !chd.is_empty() {
+        for t in tr.iter_mut() {
+            t.others.retain(|e| !matches!(e, Event::Meta { mtype: 0x7F, data, .. } if xf_chord_name(data).is_some()));
+        }
+        for (t, d) in chd {
+            tr[master].others.push(Event::Meta { t: *t, mtype: 0x7F, data: d.clone() });
+        }
+    }
+}
+
 /// Lyric events back to the typed form (for re-assigning).
 fn to_typed(items: &[(u32, String)]) -> String {
     let mut s = String::new();
@@ -386,6 +611,25 @@ mod tests {
     fn syllables_and_marks() {
         let s = syllables("Hap-py birth-day\nto you\n\nNext page");
         assert_eq!(s, vec!["Hap", "py ", "birth", "day ", "/to ", "you ", "<Next ", "page "]);
+    }
+
+    #[test]
+    fn text_export_import_round_trip() {
+        let tm = TimeMap::new(&[], 480);
+        let mut tr = vec![EditTrack::default(), EditTrack::default()];
+        tr[1].others.push(Event::Meta { t: 480, mtype: LYRIC, data: Enc::Cp1250.encode("Žlu") });
+        tr[1].others.push(Event::Meta { t: 960, mtype: LYRIC, data: Enc::Cp1250.encode("ťou ") });
+        tr[0].others.push(Event::Meta { t: 0, mtype: 0x7F, data: xf_chord_data("Am7/D").unwrap() });
+        let text = export_text(&tr, 1, &tm, Enc::Cp1250, "x.mid");
+        assert!(text.contains("Lyr\t001:02:000\t\"Žlu\""), "{text}");
+        assert!(text.contains("Chd\t001:01:000\tAm7/D"));
+        let (l, c, bad) = parse_text(&text.replace("Žlu", "Žlu-"), &tm);
+        assert_eq!((l.len(), c.len(), bad), (2, 1, 0));
+        let mut tr2 = tr.clone();
+        apply_import(&mut tr2, 1, 0, &l, &c, Enc::Cp1250);
+        assert_eq!(Enc::Cp1250.decode(&lyrics(&tr2[1])[0].2), "Žlu-");
+        assert_eq!(xf_chord_name(&xf_chord_data("F#m7(b5)").unwrap()).unwrap(), "F#m7(b5)");
+        assert_eq!(from_shown(&to_shown("a b ")), "a b ");
     }
 
     #[test]

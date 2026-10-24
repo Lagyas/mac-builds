@@ -78,22 +78,9 @@ pub fn xg4_dir() -> PathBuf {
         if let Some(d) = std::env::var_os("XGWORKS_DIR") {
             return PathBuf::from(d);
         }
-        let mut c = Vec::new();
-        if let Some(d) = settings_path().and_then(|p| std::fs::read_to_string(p.with_file_name("xg4_dir.txt")).ok()) {
-            c.push(PathBuf::from(d.trim()));
-        }
-        // the default: XG4 in the app's own folder
-        if let Some(a) = app_dir() {
-            c.push(a.join("XG4"));
-        }
-        c.push(PathBuf::from(XG4_DIR));
-        if let Some(h) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-            let h = PathBuf::from(h);
-            c.push(h.join("XG4"));
-            c.push(h.join("Documents").join("XG4"));
-        }
+        let c = xg4_candidates();
         let fallback = app_dir().map(|a| a.join("XG4")).filter(|d| d.is_dir()).unwrap_or_else(|| PathBuf::from(XG4_DIR));
-        c.into_iter().find(|d| d.join("ws.ini").is_file()).unwrap_or(fallback)
+        c.into_iter().find(|d| d.join("ws.ini").is_file() || find_ci(&d.join("ws.ini")).is_some_and(|f| f.is_file())).unwrap_or(fallback)
     })
     .clone()
 }
@@ -133,6 +120,24 @@ pub fn settings_dir() -> Option<PathBuf> {
     settings_path().and_then(|p| p.parent().map(Path::to_path_buf))
 }
 
+/// A message about missing XGworks data, with what to do.
+pub fn data_help(what: &str) -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if translocated() {
+            return format!(
+                "{what}\nmacOS started the app from a temporary copy (it is still marked as downloaded), so the XG4 folder next to it cannot be seen.\nQuit, run once in Terminal:\n    xattr -cr \"/Applications/XGWorks NextGen\"\nand start the app again (or choose the XG4 folder in Preferences)."
+            );
+        }
+        let list: Vec<String> = xg4_candidates().iter().map(|p| format!("    {}", p.display())).collect();
+        format!("{what}\nCopy your XGworks V4.0 files (ws.ini, *.ini, XGworks.exe, XGEditor folder …) into the XG4 folder next to the app, or choose the folder in Preferences (⚙). Searched:\n{}", list.join("\n"))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        format!("{what} Choose the XGworks folder on the start page.")
+    }
+}
+
 /// Whether the XGworks data folder was found (it has ws.ini).
 pub fn xg4_found() -> bool {
     read(&xg4("ws.ini")).is_some()
@@ -168,7 +173,62 @@ pub fn xg4_exe() -> PathBuf {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read(path: &Path) -> Option<Vec<u8>> {
-    std::fs::read(path).ok()
+    std::fs::read(path).ok().or_else(|| std::fs::read(find_ci(path)?).ok())
+}
+
+/// `path` with its components matched case-insensitively (XGworks' files
+/// are named "XGEditor.ini" / "xgeditor.ini" … and macOS / Linux volumes
+/// can be case-sensitive).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn find_ci(path: &Path) -> Option<PathBuf> {
+    let mut cur = PathBuf::new();
+    for comp in path.components() {
+        let name = comp.as_os_str();
+        let next = cur.join(name);
+        if next.exists() || matches!(comp, std::path::Component::Prefix(_) | std::path::Component::RootDir) {
+            cur = next;
+            continue;
+        }
+        let want = name.to_string_lossy().to_lowercase();
+        let hit = std::fs::read_dir(if cur.as_os_str().is_empty() { Path::new(".") } else { &cur })
+            .ok()?
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().to_lowercase() == want)?;
+        cur = cur.join(hit.file_name());
+    }
+    Some(cur)
+}
+
+/// macOS runs a downloaded app that still has the quarantine flag from a
+/// random read-only copy ("App Translocation"): the folders next to it are
+/// then not found. True when that is the case.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn translocated() -> bool {
+    std::env::current_exe().map(|e| e.to_string_lossy().contains("/AppTranslocation/")).unwrap_or(false)
+}
+
+/// The folders searched for the XGworks data, in order (for messages).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn xg4_candidates() -> Vec<PathBuf> {
+    let mut c = Vec::new();
+    if let Some(d) = settings_path().and_then(|p| std::fs::read_to_string(p.with_file_name("xg4_dir.txt")).ok()) {
+        c.push(PathBuf::from(d.trim()));
+    }
+    // the default: XG4 in the app's own folder
+    if let Some(a) = app_dir() {
+        c.push(a.join("XG4"));
+    }
+    c.push(PathBuf::from(XG4_DIR));
+    if let Some(h) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        let h = PathBuf::from(h);
+        for base in ["Applications", "Desktop", "Downloads", "Documents", "Music", ""] {
+            c.push(h.join(base).join("XGWorks NextGen").join("XG4"));
+        }
+        c.push(h.join("XG4"));
+        c.push(h.join("Documents").join("XG4"));
+    }
+    c.push(PathBuf::from("/Applications/XGWorks NextGen/XG4"));
+    c
 }
 
 #[cfg(target_arch = "wasm32")]

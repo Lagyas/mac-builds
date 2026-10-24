@@ -214,6 +214,25 @@ impl App {
                 ui.add(egui::DragValue::new(&mut self.metro.vel).range(1..=127));
             });
             ui.separator();
+            ui.label(egui::RichText::new("Send to the MIDI output").strong());
+            let sends: [(&str, Vec<Vec<u8>>); 3] = [
+                ("XG System On", vec![vec![0xF0, 0x43, 0x10, 0x4C, 0x00, 0x00, 0x7E, 0x00, 0xF7]]),
+                ("GM System On", vec![vec![0xF0, 0x7E, 0x7F, 0x09, 0x01, 0xF7]]),
+                ("Panic (all notes off)", (0..16u8).flat_map(|c| [vec![0xB0 | c, 120, 0], vec![0xB0 | c, 123, 0], vec![0xB0 | c, 121, 0]]).collect()),
+            ];
+            for (label, msgs) in sends {
+                if ui.button(label).clicked() {
+                    let dev = self.sel_out;
+                    if open_device(&self.midi, dev) {
+                        for m in &msgs {
+                            send_dev(&self.midi, dev, m);
+                        }
+                        self.status = format!("{label} sent.");
+                    }
+                    ui.close_menu();
+                }
+            }
+            ui.separator();
             if ui.button("Preferences…").clicked() {
                 self.show_prefs = true;
                 ui.close_menu();
@@ -222,6 +241,7 @@ impl App {
     }
 
     /// Transport: REC toggle (numpad + like the original) and the metronome.
+    #[allow(dead_code)]
     pub(super) fn record_buttons(&mut self, ui: &mut egui::Ui) {
         let rec = egui::Button::new(egui::RichText::new("REC").color(if self.rec_armed { egui::Color32::WHITE } else { egui::Color32::from_rgb(200, 30, 30) }))
             .fill(if self.rec_armed { egui::Color32::from_rgb(200, 30, 30) } else { ui.visuals().widgets.inactive.weak_bg_fill });

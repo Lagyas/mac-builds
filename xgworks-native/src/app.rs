@@ -131,6 +131,8 @@ struct App {
     /// Numpad 2 jumps back this many bars (Preferences, 2..4).
     rewind_bars: u32,
     show_prefs: bool,
+    /// The Transport window (the original's Control Panel), shown by default.
+    show_transport: bool,
     player: Option<PlayHandle>,
     /// A song chosen in the Open dialog, loaded on the next frame.
     picked: platform::Picked,
@@ -282,6 +284,7 @@ impl App {
             loop_on: false,
             rewind_bars: 2,
             show_prefs: false,
+            show_transport: true,
             player: None,
             picked: Default::default(),
             file_name: String::new(),
@@ -361,10 +364,7 @@ impl App {
         app.refresh_outputs();
         if !cfg!(target_arch = "wasm32") && !platform::xg4_found() {
             app.show_prefs = true;
-            app.status = format!(
-                "XGworks data not found ({}). Choose your XGworks V4.0 folder in Preferences (⚙) and restart.",
-                platform::xg4_dir().display()
-            );
+            app.status = platform::data_help("XGworks data not found.").lines().next().unwrap_or("").to_string();
         }
         app
     }
@@ -711,6 +711,8 @@ mod transport;
 mod fileops;
 #[path = "record.rs"]
 mod record;
+#[path = "transport_win.rs"]
+mod transport_win;
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -725,6 +727,7 @@ impl eframe::App for App {
         self.loop_check();
         self.record_tick();
         self.prefs_window(ctx);
+        self.transport_window(ctx);
         if cfg!(target_arch = "wasm32") && !self.playing {
             let now = ctx.input(|i| i.time);
             if now - self.out_poll > 1.0 {
@@ -787,8 +790,9 @@ impl eframe::App for App {
                     self.refresh_outputs();
                 }
                 ui.separator();
-                self.transport_bar(ui);
-                self.record_buttons(ui);
+                if ui.add(egui::Button::new(egui::RichText::new("▶ Transport").strong())).on_hover_text("Show / hide the Transport window (Alt+F7)").clicked() {
+                    self.show_transport = !self.show_transport;
+                }
                 ui.end_row();
                 ui.separator();
                 ui.add_enabled_ui(has, |ui| {
@@ -860,6 +864,10 @@ impl eframe::App for App {
                         self.xg.sync_from_song(&self.edit);
                         ui.close_menu();
                     }
+                    if ui.button("Transport              Alt+F7").clicked() {
+                        self.show_transport = !self.show_transport;
+                        ui.close_menu();
+                    }
                     if ui.add_enabled(has, egui::Button::new("Master Track           F8")).clicked() {
                         self.open_master();
                         ui.close_menu();
@@ -882,15 +890,8 @@ impl eframe::App for App {
                         ui.close_menu();
                     }
                 });
-                if ui.add_enabled(has, egui::Button::new("☰ Event List")).on_hover_text("Event List (List window) of the selected blocks, else the selected track (F2)").clicked() {
-                    self.list_from_selection();
-                }
-                ui.add_enabled_ui(has, |ui| ui.toggle_value(&mut self.show_mixer, "🎚 Mixer"));
-                let was = self.show_xg;
-                ui.add_enabled_ui(has, |ui| ui.toggle_value(&mut self.show_xg, "🎛 XG Editor"));
-                if self.show_xg && !was {
-                    self.xg.sync_from_song(&self.edit); // pick up mixer / song changes
-                }
+                ui.end_row();
+                self.editors_bar(ui);
             });
             ui.add_space(4.0);
         });
@@ -2074,6 +2075,60 @@ impl App {
         self.open_list(spans);
     }
 
+    /// The editors' bar: one button per window, icon + bold name (the
+    /// original's toolbar window buttons, bitmap 2003 icons 11–17).
+    fn editors_bar(&mut self, ui: &mut egui::Ui) {
+        use icons::{editor_button, Vk, MAIN_BAR};
+        let has = !self.edit.is_empty();
+        let t = self.sel_track;
+        ui.add_enabled_ui(has, |ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            let lists_open = self.open_lists.iter().any(|(_, st)| !st.master);
+            if editor_button(ui, Some((MAIN_BAR, 11)), Vk::List, "Event List", lists_open, "List of the selected blocks, else the selected track (F2)").clicked() {
+                self.list_from_selection();
+            }
+            let roll_open = self.open_rolls.iter().any(|(_, st)| st.drum.is_none() && st.staff.is_none());
+            if editor_button(ui, Some((MAIN_BAR, 12)), Vk::PianoRoll, "Piano Roll", roll_open, "Piano Roll of the selected track (F3)").clicked() {
+                self.open_roll(t);
+            }
+            let staff_open = self.open_rolls.iter().any(|(_, st)| st.staff.is_some());
+            if editor_button(ui, Some((MAIN_BAR, 13)), Vk::Staff, "Staff", staff_open, "Notation of the selected track (F4)").clicked() {
+                self.open_staff(t);
+            }
+            let drum_open = self.open_rolls.iter().any(|(_, st)| st.drum.is_some());
+            if editor_button(ui, Some((MAIN_BAR, 14)), Vk::Drum, "Drum", drum_open, "Drum window of the selected track (F5)").clicked() {
+                self.open_drum(t);
+            }
+            let master_open = self.open_lists.iter().any(|(_, st)| st.master);
+            if editor_button(ui, Some((MAIN_BAR, 17)), Vk::Master, "Master Track", master_open, "Tempo, time / key signature, markers (F8)").clicked() {
+                self.open_master();
+            }
+            if editor_button(ui, Some((MAIN_BAR, 15)), Vk::Mixer, "Mixer", self.show_mixer, "Mixer (F6)").clicked() {
+                self.show_mixer = !self.show_mixer;
+            }
+            if editor_button(ui, Some((MAIN_BAR, 16)), Vk::Xg, "XG Editor", self.show_xg, "XG Editor (F7)").clicked() {
+                self.show_xg = !self.show_xg;
+                if self.show_xg {
+                    self.xg.sync_from_song(&self.edit); // pick up mixer / song changes
+                }
+            }
+            if editor_button(ui, None, Vk::Lyrics, "Lyrics", self.lyrics.is_some(), "Lyrics / Karaoke editor (F9)").clicked() {
+                if self.lyrics.is_some() {
+                    self.lyrics = None;
+                } else {
+                    self.open_lyrics();
+                }
+            }
+            if editor_button(ui, None, Vk::Markers, "Markers", self.markers_win.is_some(), "Add Marker / Marker List").clicked() {
+                if self.markers_win.is_some() {
+                    self.markers_win = None;
+                } else {
+                    self.markers_win = Some(markerwin::MarkerState::new());
+                }
+            }
+        });
+    }
+
     /// The master track: the conductor track (XWS), else the first track (SMF).
     fn master_track(&self) -> Option<usize> {
         if self.edit.is_empty() {
@@ -2139,7 +2194,9 @@ impl App {
         let pos = self.cur_tick();
         let playing = self.playing;
         let mut acts = Vec::new();
-        let open = sub_window(ctx, "lyrics", "Lyrics / Karaoke", [900.0, 560.0], |ui| acts = st.ui(ui, &self.edit, &vis, &tm, pos, playing));
+        let master = self.master_track().unwrap_or(0);
+        let fname = self.file_name.clone();
+        let open = sub_window(ctx, "lyrics", "Lyrics / Karaoke", [900.0, 560.0], |ui| acts = st.ui(ui, &self.edit, &vis, &tm, pos, playing, master, &fname));
         for a in acts {
             match a {
                 lyricwin::LyricAction::Edit(f) => {
