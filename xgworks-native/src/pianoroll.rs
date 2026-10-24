@@ -285,9 +285,19 @@ pub struct RollState {
     redo: Vec<(Vec<EditNote>, Vec<Event>)>,
     /// Some = Drum window (rows = drum instruments), refreshed by the app.
     pub drum: Option<DrumMap>,
+    /// Some = Staff window (notation), refreshed by the app.
+    pub staff: Option<crate::staff::StaffInfo>,
 }
 
 impl RollState {
+    pub fn new_staff(track: usize, info: crate::staff::StaffInfo) -> Self {
+        let mut st = RollState::new(track);
+        st.key_h = 5.0;
+        st.quant = 8;
+        st.staff = Some(info);
+        st
+    }
+
     pub fn new_drum(track: usize, map: DrumMap) -> Self {
         let mut st = RollState::new(track);
         st.key_h = 24.0;
@@ -323,6 +333,7 @@ impl RollState {
             undo: Vec::new(),
             redo: Vec::new(),
             drum: None,
+            staff: None,
         }
     }
 }
@@ -423,7 +434,17 @@ impl RollState {
                 rmap[v as usize] = note;
             }
         }
+        if let Some(info) = &self.staff {
+            // rows = diatonic steps (lines and spaces)
+            let w = info.written as i32;
+            for i in 0..128u8 {
+                let step = crate::staff::spell((i as i32 + w).clamp(0, 127) as u8, info.sf).0;
+                vmap[i as usize] = info.row(step).clamp(0, 127) as u8;
+                rmap[i as usize] = (crate::staff::pitch_of_step(info.step_of_row(i as i32), info.sf) as i32 - w).clamp(0, 127) as u8;
+            }
+        }
         let is_drum = self.drum.is_some();
+        let is_staff = self.staff.is_some();
         let vp = move |n: u8| vmap[n as usize & 127];
         let rp = move |v: u8| rmap[v as usize & 127];
 
@@ -437,7 +458,15 @@ impl RollState {
         if !self.fitted {
             self.px_per_tick = (grid_w / cx.total_ticks.max(ppqn * 16) as f32).max(0.05);
             let t = &tracks[self.track];
-            if let (Some(lo), Some(hi)) = (t.notes.iter().map(|n| vp(n.pitch)).min(), t.notes.iter().map(|n| vp(n.pitch)).max()) {
+            if let Some(info) = &self.staff {
+                let rows = notes.height() / self.key_h;
+                let centre = match info.clef {
+                    crate::staff::Clef::Treble => 41.0,
+                    crate::staff::Clef::Bass => 29.0,
+                    crate::staff::Clef::Grand => 33.0,
+                };
+                self.top_pitch = (centre + rows / 2.0).clamp(rows.min(127.0), 127.0);
+            } else if let (Some(lo), Some(hi)) = (t.notes.iter().map(|n| vp(n.pitch)).min(), t.notes.iter().map(|n| vp(n.pitch)).max()) {
                 let rows = notes.height() / self.key_h;
                 self.top_pitch = ((lo as f32 + hi as f32) / 2.0 + rows / 2.0).clamp(rows, 127.0);
             }
@@ -516,6 +545,9 @@ impl RollState {
         let first = pitch_of(notes.bottom() - 1.0);
         let last = pitch_of(notes.top() + 1.0);
         for pi in first..=last {
+            if is_staff {
+                break;
+            }
             let y = y_of(pi);
             let row = Rect::from_min_size(Pos2::new(gx0, y), Vec2::new(notes.right() - gx0, key_h));
             if let Some(d) = &self.drum {
@@ -553,16 +585,30 @@ impl RollState {
         while x_of(t) <= notes.right() {
             let x = x_of(t);
             if x > gx0 {
-                let col = if t % bar == 0 { BAR_LINE } else { Color32::from_gray(205) };
+                let col = if is_staff { Color32::from_gray(225) } else if t % bar == 0 { BAR_LINE } else { Color32::from_gray(205) };
                 p.line_segment([Pos2::new(x, notes.top()), Pos2::new(x, notes.bottom())], Stroke::new(1.0_f32, col));
             }
             t += ppqn;
+        }
+
+        // staff: lines, clef, key / time signature, bar lines
+        let staff_info = self.staff;
+        let y_step = |st: i32| y_of(staff_info.map_or(st, |i| i.row(st)).clamp(0, 127) as u8) + key_h / 2.0;
+        let t_end = tick_of(notes.right());
+        if let Some(info) = &self.staff {
+            let v = crate::staff::View { x_of: &x_of, y_step: &y_step, half: key_h, left: notes.left(), right: notes.right(), gx0, ppqn };
+            info.draw_staff(&p, &v);
+            info.draw_bars(&p, &v, t0 as u32, t_end);
         }
 
         // notes
         let trk_ch = tracks[self.track].channel & 0x0F;
         let mark_r = |vel: u8| (key_h * 0.5 - 2.0).max(3.0) * (0.45 + 0.55 * vel as f32 / 127.0);
         let note_rect = |n: &EditNote| {
+            if is_staff {
+                let c = Pos2::new(x_of(n.tick), y_of(vp(n.pitch)) + key_h / 2.0);
+                return Rect::from_center_size(c, Vec2::new(key_h * 2.6, key_h * 2.0));
+            }
             if is_drum {
                 let c = Pos2::new(x_of(n.tick), y_of(vp(n.pitch)) + key_h / 2.0);
                 return Rect::from_center_size(c, Vec2::splat(2.0 * mark_r(n.vel).max(4.0)));
@@ -572,7 +618,15 @@ impl RollState {
         };
         {
             let trk = &tracks[self.track];
+            if let Some(info) = &self.staff {
+                let v = crate::staff::View { x_of: &x_of, y_step: &y_step, half: key_h, left: notes.left(), right: notes.right(), gx0, ppqn };
+                let sel = &self.sel;
+                info.draw_notes(&p, &v, &trk.notes, &|i| sel.contains(&i), t0 as u32, t_end);
+            }
             for (i, n) in trk.notes.iter().enumerate() {
+                if is_staff {
+                    break;
+                }
                 let r = note_rect(n);
                 if r.right() < gx0 || r.left() > notes.right() || r.bottom() < notes.top() || r.top() > notes.bottom() {
                     continue;
@@ -611,7 +665,7 @@ impl RollState {
             }
         }
         let hit = |pos: Pos2, notes: &[EditNote]| notes.iter().rposition(|n| note_rect(n).contains(pos));
-        let near_end = |pos: Pos2, n: &EditNote| !is_drum && (note_rect(n).right() - pos.x).abs() <= 4.0;
+        let near_end = |pos: Pos2, n: &EditNote| !is_drum && !is_staff && (note_rect(n).right() - pos.x).abs() <= 4.0;
         let tr = &mut tracks[self.track];
         // a click in the grid takes the keyboard back from the toolbar fields,
         // otherwise Del / Ctrl+C / Ctrl+V would keep going to a DragValue

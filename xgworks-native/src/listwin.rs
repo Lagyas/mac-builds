@@ -1376,7 +1376,7 @@ fn list_row_h(ctx: &egui::Context, f: &FontId) -> f32 {
 /// at `px` (0 = default) for the list windows.
 pub fn set_list_font(ctx: &egui::Context, bytes: Option<Vec<u8>>, px: f32) {
     FONT_PX.store(px.to_bits(), std::sync::atomic::Ordering::Relaxed);
-    let mut defs = egui::FontDefinitions::default();
+    let mut defs = base_fonts();
     let data = bytes.or_else(|| crate::platform::read(&crate::platform::list_font_path()));
     if let Some(b) = data {
         defs.font_data.insert("listfont".into(), egui::FontData { font: b.into(), index: 0, tweak: Default::default() });
@@ -1390,7 +1390,19 @@ pub fn set_list_font(ctx: &egui::Context, bytes: Option<Vec<u8>>, px: f32) {
 /// The built-in monospace font for the list windows, at `px` (0 = default).
 pub fn set_list_font_builtin(ctx: &egui::Context, px: f32) {
     FONT_PX.store(px.to_bits(), std::sync::atomic::Ordering::Relaxed);
-    ctx.set_fonts(egui::FontDefinitions::default());
+    ctx.set_fonts(base_fonts());
+}
+
+/// egui's default fonts plus XGworks' notation font (`XG4/XGmusic.ttf`,
+/// family "xgmusic", symbol code points U+F020..) for the Staff window.
+pub fn base_fonts() -> egui::FontDefinitions {
+    let mut defs = egui::FontDefinitions::default();
+    static MUSIC: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
+    if let Some(b) = MUSIC.get_or_init(|| crate::platform::read(&crate::platform::xg4("XGmusic.ttf"))) {
+        defs.font_data.insert("xgmusic".into(), egui::FontData { font: b.clone().into(), index: 0, tweak: Default::default() });
+        defs.families.insert(FontFamily::Name("xgmusic".into()), vec!["xgmusic".to_string()]);
+    }
+    defs
 }
 
 /// The family name of a TrueType / OpenType font (or the first of a
@@ -1431,8 +1443,11 @@ pub fn font_family_name(b: &[u8]) -> Option<String> {
 
 /// Register MS Gothic (from the Windows fonts) as the "list" family.
 pub fn install_font(ctx: &egui::Context) {
-    let Some(bytes) = crate::platform::read(&crate::platform::list_font_path()) else { return };
-    let mut defs = egui::FontDefinitions::default();
+    let mut defs = base_fonts();
+    let Some(bytes) = crate::platform::read(&crate::platform::list_font_path()) else {
+        ctx.set_fonts(defs);
+        return;
+    };
     defs.font_data.insert("msgothic".into(), egui::FontData { font: bytes.into(), index: 0, tweak: Default::default() });
     let mut fam = vec!["msgothic".to_string()];
     fam.extend(defs.families.get(&FontFamily::Monospace).cloned().unwrap_or_default());

@@ -16,6 +16,7 @@ mod mixwin;
 mod peres;
 mod pianoroll;
 mod pluginwin;
+mod staff;
 pub mod platform;
 mod player;
 mod xged;

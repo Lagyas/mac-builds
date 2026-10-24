@@ -1,6 +1,6 @@
 [package]
 name = "xgworks-native"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "XGWorks NextGen — XGworks-style editor/player for .XWS / .MID (egui) on xgworks-core; native desktop and, via ../xgworks-web, the browser"
 

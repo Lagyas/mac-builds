@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::platform::{self, Instant};
 use crate::player::{self, open_device, send_dev, send_shared, PlayHandle, SharedOut};
-use crate::{clip, icons, jobwin, listwin, lyricwin, markerwin, midiio, mixwin, pianoroll, pluginwin, xfwin, xged};
+use crate::{clip, icons, jobwin, listwin, lyricwin, markerwin, midiio, staff, mixwin, pianoroll, pluginwin, xfwin, xged};
 
 use eframe::egui;
 use xgworks_core::mixer::{self, PartMix};
@@ -25,6 +25,13 @@ fn apply_args(app: &mut App, args: &[String]) {
                 if let Some(n) = it.next().and_then(|n| n.parse::<usize>().ok()) {
                     if let Some(&ti) = app.visible_tracks().get(n.saturating_sub(1)) {
                         app.open_roll(ti);
+                    }
+                }
+            }
+            "--staff" => {
+                if let Some(n) = it.next().and_then(|n| n.parse::<usize>().ok()) {
+                    if let Some(&ti) = app.visible_tracks().get(n.saturating_sub(1)) {
+                        app.open_staff(ti);
                     }
                 }
             }
@@ -836,6 +843,10 @@ impl eframe::App for App {
                         self.open_roll(t);
                         ui.close_menu();
                     }
+                    if ui.add_enabled(has_t, egui::Button::new("Staff (notation)       F4")).clicked() {
+                        self.open_staff(t);
+                        ui.close_menu();
+                    }
                     if ui.add_enabled(has_t, egui::Button::new("Drum                   F5")).clicked() {
                         self.open_drum(t);
                         ui.close_menu();
@@ -946,12 +957,23 @@ impl eframe::App for App {
             // monitoring: each track's channel on its port's device
             let outs: Vec<(usize, u8)> = self.edit.iter().map(|t| (self.port_device(t.port()), t.channel & 0x0F)).collect();
             let mut rolls = std::mem::take(&mut self.open_rolls);
-            for (_, st) in rolls.iter_mut().filter(|(_, st)| st.drum.is_some()) {
-                st.drum = Some(self.drum_map(st.track));
+            for (_, st) in rolls.iter_mut() {
+                if st.drum.is_some() {
+                    st.drum = Some(self.drum_map(st.track));
+                }
+                if st.staff.is_some() {
+                    st.staff = Some(self.staff_info(st.track));
+                }
             }
             let mut edited = false;
             rolls.retain_mut(|(id, st)| {
-                let title = if st.drum.is_some() { format!("Drum:{}", *id + 1) } else { format!("Piano Roll:{}", *id + 1) };
+                let title = if st.drum.is_some() {
+                    format!("Drum:{}", *id + 1)
+                } else if st.staff.is_some() {
+                    format!("Staff:{}", *id + 1)
+                } else {
+                    format!("Piano Roll:{}", *id + 1)
+                };
                 let (dev, ch) = outs.get(st.track).copied().unwrap_or((self.sel_out, 0));
                 let midi = self.midi.clone();
                 let monitor = move |note: u8, vel: u8| {
@@ -1752,6 +1774,9 @@ impl App {
         if ctx.input(|i| i.key_pressed(egui::Key::F3)) && self.sel_track < self.edit.len() {
             self.open_roll(self.sel_track);
         }
+        if ctx.input(|i| i.key_pressed(egui::Key::F4)) {
+            self.open_staff(self.sel_track);
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
             self.open_drum(self.sel_track);
         }
@@ -2134,6 +2159,47 @@ impl App {
         if self.playing {
             ctx.request_repaint();
         }
+    }
+
+    /// Staff window for track `i` (Window ▸ Staff, F4 in the Track View).
+    fn open_staff(&mut self, i: usize) {
+        if i >= self.edit.len() {
+            return;
+        }
+        self.sel_track = i;
+        let info = self.staff_info(i);
+        self.open_rolls.push((self.next_roll_id, pianoroll::RollState::new_staff(i, info)));
+        self.next_roll_id += 1;
+    }
+
+    /// Key / time signature at the song start (master track) and the clef for the track.
+    fn staff_info(&self, i: usize) -> staff::StaffInfo {
+        let mut info = staff::StaffInfo::default();
+        let metas = self.edit.iter().flat_map(|t| t.others.iter());
+        let mut key_t = u32::MAX;
+        let mut ts_t = u32::MAX;
+        for e in metas {
+            match e {
+                Event::Meta { t, mtype: 0x59, data } if data.len() >= 2 && *t < key_t => {
+                    key_t = *t;
+                    info.sf = (data[0] as i8).clamp(-7, 7);
+                }
+                Event::Meta { t, mtype: 0x58, data } if data.len() >= 2 && data[0] > 0 && *t < ts_t => {
+                    ts_t = *t;
+                    info.ts_num = data[0] as u32;
+                    info.ts_den = 1u32 << data[1].min(5);
+                }
+                _ => {}
+            }
+        }
+        if let Some(t) = self.edit.get(i) {
+            // guitar / bass (Track View Type: Gtr / Bass Tab) are written an octave up
+            let kind = t.inst_type().to_be_bytes()[0];
+            info.written = if matches!(kind, 3..=6) { 12 } else { 0 };
+            let shown: Vec<xgworks_core::EditNote> = t.notes.iter().map(|n| xgworks_core::EditNote { pitch: (n.pitch as i32 + info.written as i32).clamp(0, 127) as u8, ..n.clone() }).collect();
+            info.clef = if matches!(kind, 4 | 6) { staff::Clef::Bass } else { staff::clef_for(&shown) };
+        }
+        info
     }
 
     /// Drum window for track `i` (Window ▸ Drum, F5 in the Track View).

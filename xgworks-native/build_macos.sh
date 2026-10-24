@@ -38,7 +38,7 @@ codesign --force --deep -s - "$APP"
 # The app's folder: everything it needs sits next to it (found automatically).
 mkdir -p "$DIST/XG4" "$DIST/Songs" "$DIST/Settings" "$DIST/Fonts"
 cat > "$DIST/XG4/README.txt" <<'TXT'
-Copy the files of your XGworks V4.0 installation here (ws.ini, inst.ini,
+Copy the files of your XGworks V4.0 installation here (ws.ini, inst.ini, XGmusic.ttf,
 Drum Kit.ini, Melody.ini and the other *.ini files, XGworks.exe and the
 XGEditor folder). XGWorks NextGen finds them here automatically.
 TXT
