@@ -156,12 +156,46 @@ pub fn has_font(ctx: &egui::Context) -> bool {
     ctx.fonts(|f| f.families().contains(&FontFamily::Name("xgmusic".into())))
 }
 
-/// Draw a music glyph with the top of its ink at `at` (every XGmusic glyph
-/// starts at the font's ascender line, which is the top of egui's galley;
-/// one em = 4 staff spaces at the sizes used here).
-fn put(p: &Painter, at: Pos2, code: u32, size: f32, col: Color32) {
-    let g = p.layout_no_wrap(glyph(code), music(size), col);
-    p.galley(at, g, col);
+/// Where the notation is drawn: the screen (egui Painter) or an SVG page.
+pub trait Canvas {
+    fn line_segment(&self, pts: [Pos2; 2], stroke: Stroke);
+    fn circle_filled(&self, c: Pos2, r: f32, col: Color32);
+    fn add(&self, shape: egui::Shape);
+    fn rect_filled(&self, r: egui::Rect, rounding: f32, col: Color32);
+    fn text(&self, pos: Pos2, align: egui::Align2, text: &str, font: FontId, col: Color32);
+    /// A music glyph with the top of its ink at `at` (every XGmusic glyph
+    /// starts at the font's ascender line; one em = 4 staff spaces here).
+    fn glyph(&self, at: Pos2, code: u32, size: f32, col: Color32);
+    fn music_font(&self) -> bool;
+}
+
+impl Canvas for Painter {
+    fn line_segment(&self, pts: [Pos2; 2], stroke: Stroke) {
+        Painter::line_segment(self, pts, stroke);
+    }
+    fn circle_filled(&self, c: Pos2, r: f32, col: Color32) {
+        Painter::circle_filled(self, c, r, col);
+    }
+    fn add(&self, shape: egui::Shape) {
+        Painter::add(self, shape);
+    }
+    fn rect_filled(&self, r: egui::Rect, rounding: f32, col: Color32) {
+        Painter::rect_filled(self, r, rounding, col);
+    }
+    fn text(&self, pos: Pos2, align: egui::Align2, text: &str, font: FontId, col: Color32) {
+        Painter::text(self, pos, align, text, font, col);
+    }
+    fn glyph(&self, at: Pos2, code: u32, size: f32, col: Color32) {
+        let g = self.layout_no_wrap(glyph(code), music(size), col);
+        self.galley(at, g, col);
+    }
+    fn music_font(&self) -> bool {
+        has_font(self.ctx())
+    }
+}
+
+fn put(p: &dyn Canvas, at: Pos2, code: u32, size: f32, col: Color32) {
+    p.glyph(at, code, size, col);
 }
 
 /// Everything the staff drawing needs from the roll.
@@ -211,8 +245,8 @@ impl StaffInfo {
     }
 
     /// Staff lines, clef, key and time signature (left of `gx0`).
-    pub fn draw_staff(&self, p: &Painter, v: &View) {
-        let font = has_font(p.ctx());
+    pub fn draw_staff(&self, p: &dyn Canvas, v: &View) {
+        let font = p.music_font();
         let space = v.half * 2.0;
         let size = space * 4.0;
         for lines in self.staves() {
@@ -247,7 +281,8 @@ impl StaffInfo {
             x += space * 0.5;
             // time signature
             let digits = |n: u32| n.to_string().chars().map(|c| 0x30 + c.to_digit(10).unwrap_or(0)).collect::<Vec<_>>();
-            for (num, y_step) in [(self.ts_num, lines[3]), (self.ts_den, lines[1])] {
+            let sig: &[(u32, i32)] = if self.ts_num > 0 { &[(self.ts_num, lines[3]), (self.ts_den, lines[1])] } else { &[] };
+            for &(num, y_step) in sig {
                 let mut dx = x;
                 for d in digits(num) {
                     if font {
@@ -255,7 +290,7 @@ impl StaffInfo {
                         let top = if y_step == lines[3] { (v.y_step)(lines[4]) } else { (v.y_step)(lines[2]) };
                         put(p, Pos2::new(dx, top), d, size, Color32::BLACK);
                     } else {
-                        p.text(Pos2::new(dx, (v.y_step)(y_step)), egui::Align2::LEFT_CENTER, ((d - 0x30) as u8 + b'0') as char, FontId::proportional(space * 2.0), Color32::BLACK);
+                        p.text(Pos2::new(dx, (v.y_step)(y_step)), egui::Align2::LEFT_CENTER, &(((d - 0x30) as u8 + b'0') as char).to_string(), FontId::proportional(space * 2.0), Color32::BLACK);
                     }
                     dx += space * 1.6;
                 }
@@ -264,7 +299,7 @@ impl StaffInfo {
     }
 
     /// Bar lines through the staves.
-    pub fn draw_bars(&self, p: &Painter, v: &View, t0: u32, t1: u32) {
+    pub fn draw_bars(&self, p: &dyn Canvas, v: &View, t0: u32, t1: u32) {
         let bar = self.bar(v.ppqn);
         let staves = self.staves();
         let top = (v.y_step)(staves[0][4]);
@@ -295,8 +330,8 @@ impl StaffInfo {
     }
 
     /// Notes, rests, ties. `sel(i)` = note i is selected.
-    pub fn draw_notes(&self, p: &Painter, v: &View, notes: &[EditNote], sel: &dyn Fn(usize) -> bool, t0: u32, t1: u32) {
-        let font = has_font(p.ctx());
+    pub fn draw_notes(&self, p: &dyn Canvas, v: &View, notes: &[EditNote], sel: &dyn Fn(usize) -> bool, t0: u32, t1: u32) {
+        let font = p.music_font();
         let bar = self.bar(v.ppqn);
         let space = v.half * 2.0;
         let gsize = space * 4.0;
@@ -501,7 +536,7 @@ impl StaffInfo {
     }
 }
 
-fn head(p: &Painter, c: Pos2, space: f32, open: bool, col: Color32) {
+fn head(p: &dyn Canvas, c: Pos2, space: f32, open: bool, col: Color32) {
     // an ellipse tilted like engraved note heads
     let (rx, ry, a) = (space * 0.62, space * 0.45, -0.35f32);
     let pts: Vec<Pos2> = (0..16)
@@ -518,7 +553,7 @@ fn head(p: &Painter, c: Pos2, space: f32, open: bool, col: Color32) {
     }
 }
 
-fn ledger(p: &Painter, x: f32, step: i32, lines: &[i32; 5], v: &View, head_w: f32) {
+fn ledger(p: &dyn Canvas, x: f32, step: i32, lines: &[i32; 5], v: &View, head_w: f32) {
     let w = head_w * 0.9;
     let mut s = lines[4] + 2;
     while s <= step {
@@ -534,7 +569,7 @@ fn ledger(p: &Painter, x: f32, step: i32, lines: &[i32; 5], v: &View, head_w: f3
     }
 }
 
-fn tie(p: &Painter, a: Pos2, b: Pos2, below: bool, col: Color32) {
+fn tie(p: &dyn Canvas, a: Pos2, b: Pos2, below: bool, col: Color32) {
     let mid = Pos2::new((a.x + b.x) / 2.0, a.y + if below { 4.0 } else { -4.0 });
     let pts: Vec<Pos2> = (0..=12)
         .map(|k| {
@@ -547,7 +582,7 @@ fn tie(p: &Painter, a: Pos2, b: Pos2, below: bool, col: Color32) {
 }
 
 /// # / b / natural at `c` (centre on the line / space).
-fn accidental(p: &Painter, c: Pos2, alt: i32, space: f32, font: bool) {
+fn accidental(p: &dyn Canvas, c: Pos2, alt: i32, space: f32, font: bool) {
     if font {
         let code = match alt {
             1 => 0x41,
@@ -572,7 +607,7 @@ fn accidental(p: &Painter, c: Pos2, alt: i32, space: f32, font: bool) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn flag(p: &Painter, at: Pos2, n: u8, up: bool, space: f32, font: bool, size: f32, col: Color32) {
+fn flag(p: &dyn Canvas, at: Pos2, n: u8, up: bool, space: f32, font: bool, size: f32, col: Color32) {
     if font {
         // up-stem flags 0x4B.. hang down from the stem end, down-stem 0x4E..
         let code = if up { 0x4A + n as u32 } else { 0x4D + n as u32 };
@@ -587,7 +622,7 @@ fn flag(p: &Painter, at: Pos2, n: u8, up: bool, space: f32, font: bool, size: f3
 }
 
 #[allow(clippy::too_many_arguments)]
-fn rest(p: &Painter, mid: Pos2, val: &(u32, u8, bool, bool, bool), whole_bar: bool, space: f32, font: bool, size: f32, lines: &[i32; 5], v: &View) {
+fn rest(p: &dyn Canvas, mid: Pos2, val: &(u32, u8, bool, bool, bool), whole_bar: bool, space: f32, font: bool, size: f32, lines: &[i32; 5], v: &View) {
     let col = Color32::from_gray(40);
     let (ticks, flags, dotted, open, _) = *val;
     let q = v.ppqn;

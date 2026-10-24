@@ -287,6 +287,8 @@ pub struct RollState {
     pub drum: Option<DrumMap>,
     /// Some = Staff window (notation), refreshed by the app.
     pub staff: Option<crate::staff::StaffInfo>,
+    /// Staff window: "Print / Export…" was clicked (the app writes the SVG).
+    pub export_req: bool,
 }
 
 impl RollState {
@@ -334,6 +336,7 @@ impl RollState {
             redo: Vec::new(),
             drum: None,
             staff: None,
+            export_req: false,
         }
     }
 }
@@ -1024,6 +1027,13 @@ impl RollState {
             }
             if icons::tool_button(ui, icons::ROLL_TOP, 7, self.triplet, "3", "Triplet").clicked() {
                 self.triplet = !self.triplet;
+            }
+            if self.staff.is_some() {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.separator();
+                if ui.button(egui::RichText::new("Print / Export…").strong()).on_hover_text("The whole track as printable pages (SVG, opens in the browser / Preview: print or save as PDF there)").clicked() {
+                    self.export_req = true;
+                }
             }
         });
     }

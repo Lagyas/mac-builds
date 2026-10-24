@@ -17,6 +17,7 @@ mod peres;
 mod pianoroll;
 mod pluginwin;
 mod staff;
+mod staff_svg;
 pub mod platform;
 mod player;
 mod xged;

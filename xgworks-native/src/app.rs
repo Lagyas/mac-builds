@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::platform::{self, Instant};
 use crate::player::{self, open_device, send_dev, send_shared, PlayHandle, SharedOut};
-use crate::{clip, icons, jobwin, listwin, lyricwin, markerwin, midiio, staff, mixwin, pianoroll, pluginwin, xfwin, xged};
+use crate::{clip, icons, jobwin, listwin, lyricwin, markerwin, midiio, staff, staff_svg, mixwin, pianoroll, pluginwin, xfwin, xged};
 
 use eframe::egui;
 use xgworks_core::mixer::{self, PartMix};
@@ -996,6 +996,24 @@ impl eframe::App for App {
                 let edit = &mut self.edit;
                 sub_window(ctx, ("roll", *id), &title, [1000.0, 620.0], |ui| edited |= st.ui(ui, edit, &cx))
             });
+            for (_, st) in rolls.iter_mut().filter(|(_, st)| st.export_req) {
+                st.export_req = false;
+                if let (Some(info), Some(t)) = (st.staff, self.edit.get(st.track)) {
+                    let title = format!("{} — {}", std::path::Path::new(&self.file_name).file_stem().and_then(|x| x.to_str()).unwrap_or("Song"), t.name);
+                    let ttf = platform::read(&platform::xg4("XGmusic.ttf"));
+                    let notes: Vec<xgworks_core::EditNote> = t.notes.iter().map(|n| xgworks_core::EditNote { pitch: (n.pitch as i32 + info.written as i32).clamp(0, 127) as u8, ..n.clone() }).collect();
+                    let mut plain = info;
+                    plain.written = 0;
+                    let svg = staff_svg::export(&title, &notes, &plain, self.ppqn as u32, ttf.as_deref());
+                    let name = format!("{}.svg", title.replace(['/', '\\', ':'], "-"));
+                    if let Some((msg, path)) = platform::save_song_to(&name, "svg", "SVG (print / PDF)", svg.as_bytes()) {
+                        self.status = msg;
+                        if let Some(p) = path {
+                            platform::open_with_default_app(&p);
+                        }
+                    }
+                }
+            }
             self.open_rolls = rolls;
             if edited {
                 self.rebuild_view();

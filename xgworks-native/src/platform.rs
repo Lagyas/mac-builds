@@ -138,6 +138,21 @@ pub fn data_help(what: &str) -> String {
     }
 }
 
+/// Open a file with the system's default app (browser / Preview for SVG).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn open_with_default_app(p: &Path) {
+    let _ = if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(p).spawn()
+    } else if cfg!(windows) {
+        std::process::Command::new("cmd").args(["/C", "start", ""]).arg(p).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(p).spawn()
+    };
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn open_with_default_app(_p: &Path) {}
+
 /// Whether the XGworks data folder was found (it has ws.ini).
 pub fn xg4_found() -> bool {
     read(&xg4("ws.ini")).is_some()
