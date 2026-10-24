@@ -22,6 +22,15 @@ pub const LIST_FONT: &str = r"C:\Windows\Fonts\msgothic.ttc";
 #[cfg(target_arch = "wasm32")]
 pub const LIST_FONT: &str = "fonts/msgothic.ttc";
 
+/// MS Gothic for the List window: `Fonts/msgothic.ttc` in the app folder, else the system one.
+pub fn list_font_path() -> PathBuf {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(f) = app_sub("Fonts").map(|d| d.join("msgothic.ttc")).filter(|f| f.is_file()) {
+        return f;
+    }
+    PathBuf::from(LIST_FONT)
+}
+
 /// Fonts a list window can use: (family name, file). Natively the Windows
 /// fonts folder; on the web the fonts the page provided.
 #[cfg(not(target_arch = "wasm32"))]
@@ -32,6 +41,9 @@ pub fn font_files() -> Vec<(String, String)> {
         if let Some(h) = std::env::var_os("HOME") {
             dirs.push(PathBuf::from(h).join("Library/Fonts"));
         }
+    }
+    if let Some(f) = app_sub("Fonts") {
+        dirs.insert(0, f);
     }
     let mut out: Vec<(String, String)> = dirs
         .iter()
@@ -70,19 +82,55 @@ pub fn xg4_dir() -> PathBuf {
         if let Some(d) = settings_path().and_then(|p| std::fs::read_to_string(p.with_file_name("xg4_dir.txt")).ok()) {
             c.push(PathBuf::from(d.trim()));
         }
+        // the default: XG4 in the app's own folder
+        if let Some(a) = app_dir() {
+            c.push(a.join("XG4"));
+        }
         c.push(PathBuf::from(XG4_DIR));
         if let Some(h) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
             let h = PathBuf::from(h);
             c.push(h.join("XG4"));
             c.push(h.join("Documents").join("XG4"));
         }
-        if let Some(exe_dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
-            c.push(exe_dir.join("XG4"));
-            c.push(exe_dir.join("../../../XG4")); // Foo.app/Contents/MacOS → next to the bundle
-        }
-        c.into_iter().find(|d| d.join("ws.ini").is_file()).unwrap_or_else(|| PathBuf::from(XG4_DIR))
+        let fallback = app_dir().map(|a| a.join("XG4")).filter(|d| d.is_dir()).unwrap_or_else(|| PathBuf::from(XG4_DIR));
+        c.into_iter().find(|d| d.join("ws.ini").is_file()).unwrap_or(fallback)
     })
     .clone()
+}
+
+/// The app's own folder: the one holding `XGWorks NextGen.app` on macOS,
+/// else the folder of the executable. Its sub-folders are the defaults:
+/// `XG4/` (XGworks data), `Songs/`, `Settings/`, `Fonts/`.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn app_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = exe.canonicalize().unwrap_or(exe);
+    let dir = exe.parent()?.to_path_buf();
+    if dir.ends_with("Contents/MacOS") {
+        // Foo.app/Contents/MacOS → the folder that contains Foo.app
+        return dir.parent()?.parent()?.parent().map(Path::to_path_buf);
+    }
+    Some(dir)
+}
+
+/// A sub-folder of the app's folder, when it exists.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn app_sub(name: &str) -> Option<PathBuf> {
+    app_dir().map(|a| a.join(name)).filter(|d| d.is_dir())
+}
+
+/// Forget a folder chosen in Preferences: back to `XG4` next to the app.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn reset_xg4_dir() {
+    if let Some(p) = settings_path() {
+        let _ = std::fs::remove_file(p.with_file_name("xg4_dir.txt"));
+    }
+}
+
+/// Where the settings are kept (shown in Preferences).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn settings_dir() -> Option<PathBuf> {
+    settings_path().and_then(|p| p.parent().map(Path::to_path_buf))
 }
 
 /// Whether the XGworks data folder was found (it has ws.ini).
@@ -149,6 +197,13 @@ pub fn read(path: &Path) -> Option<Vec<u8>> {
 /// `%APPDATA%\XGworks Port\settings.ini`, on the web the browser's localStorage.
 #[cfg(not(target_arch = "wasm32"))]
 fn settings_path() -> Option<PathBuf> {
+    // portable: the app's own Settings folder (made when the app folder has XG4/)
+    if let Some(a) = app_dir() {
+        let st = a.join("Settings");
+        if st.is_dir() || (a.join("XG4").is_dir() && std::fs::create_dir_all(&st).is_ok()) {
+            return Some(st.join("settings.ini"));
+        }
+    }
     let base = std::env::var_os("APPDATA").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".config")))?;
     Some(base.join("XGworks Port").join("settings.ini"))
 }
@@ -191,7 +246,11 @@ pub type Picked = std::rc::Rc<std::cell::RefCell<Option<(String, Vec<u8>)>>>;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn open_song(slot: &Picked, _ctx: &eframe::egui::Context) {
-    if let Some(path) = rfd::FileDialog::new().add_filter("XGworks / MIDI", &["xws", "XWS", "mid", "MID"]).pick_file() {
+    let mut dlg = rfd::FileDialog::new().add_filter("XGworks / MIDI", &["xws", "XWS", "mid", "MID"]);
+    if let Some(d) = app_sub("Songs") {
+        dlg = dlg.set_directory(d);
+    }
+    if let Some(path) = dlg.pick_file() {
         if let Ok(bytes) = std::fs::read(&path) {
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("file").to_string();
             *slot.borrow_mut() = Some((name, bytes));
@@ -275,7 +334,11 @@ pub fn pick_files(slot: &PickedFiles, ctx: &eframe::egui::Context, filter: &str,
 /// Returns the status line text.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save_song(default_name: &str, ext: &str, filter: &str, bytes: &[u8]) -> Option<String> {
-    let path = rfd::FileDialog::new().set_file_name(default_name).add_filter(filter, &[ext]).save_file()?;
+    let mut dlg = rfd::FileDialog::new().set_file_name(default_name).add_filter(filter, &[ext]);
+    if let Some(d) = app_sub("Songs") {
+        dlg = dlg.set_directory(d);
+    }
+    let path = dlg.save_file()?;
     Some(match std::fs::write(&path, bytes) {
         Ok(_) => format!("Saved {} ({} bytes).", path.display(), bytes.len()),
         Err(e) => format!("Save failed: {e}"),

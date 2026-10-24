@@ -220,13 +220,31 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(crate::platform::xg4_dir().display().to_string()).monospace());
                     #[cfg(not(target_arch = "wasm32"))]
-                    if ui.button("Choose…").clicked() {
-                        if let Some(d) = crate::platform::pick_xg4_dir() {
-                            self.status = format!("XGworks data: {} — restart the app to reload all tables.", d.display());
+                    {
+                        if ui.button("Choose…").clicked() {
+                            if let Some(d) = crate::platform::pick_xg4_dir() {
+                                self.status = format!("XGworks data: {} — restart the app to reload all tables.", d.display());
+                            }
+                        }
+                        if ui.button("Default").on_hover_text("Use the XG4 folder next to the app").clicked() {
+                            crate::platform::reset_xg4_dir();
+                            self.status = "XGworks data: the XG4 folder next to the app — restart the app.".into();
                         }
                     }
                 });
                 ui.end_row();
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    ui.label("Data found");
+                    ui.label(if crate::platform::xg4_found() { "yes" } else { "no — copy your XGworks files into XG4" });
+                    ui.end_row();
+                    ui.label("App folder");
+                    ui.label(egui::RichText::new(crate::platform::app_dir().map_or("?".into(), |d| d.display().to_string())).monospace());
+                    ui.end_row();
+                    ui.label("Settings");
+                    ui.label(egui::RichText::new(crate::platform::settings_dir().map_or("?".into(), |d| d.display().to_string())).monospace());
+                    ui.end_row();
+                }
             });
             ui.label(egui::RichText::new("Keys: Space play/stop · numpad 0 start · 1 L · 3 R · 2 back · − loop").small());
         });

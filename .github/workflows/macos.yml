@@ -35,7 +35,7 @@ jobs:
           mkdir -p out
           ditto hs2-apple/dd/Build/Products/Release/HS2.app "out/HS2.app"
           ditto "hs2-native/target/HS2 Classic.app" "out/HS2 Classic.app"
-          ditto "xgworks-native/target/XGWorks NextGen.app" "out/XGWorks NextGen.app"
+          ditto "xgworks-native/target/XGWorks NextGen" "out/XGWorks NextGen"
           cp mac-README.txt out/README.txt
           lipo -archs "out/HS2.app/Contents/MacOS/HS2"
           cd out && ditto -c -k --sequesterRsrc . ../Lagyas-macOS-apps.zip

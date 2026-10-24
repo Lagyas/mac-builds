@@ -9,8 +9,9 @@ VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 cargo build --release --target aarch64-apple-darwin
 cargo build --release --target x86_64-apple-darwin
-APP="target/XGWorks NextGen.app"
-rm -rf "$APP"
+DIST="target/XGWorks NextGen"
+APP="$DIST/XGWorks NextGen.app"
+rm -rf "$DIST"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 lipo -create -output "$APP/Contents/MacOS/xgworks-native" \
   target/aarch64-apple-darwin/release/xgworks-native \
@@ -34,6 +35,17 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 # ad-hoc signature so Gatekeeper lets a locally built app start
 codesign --force --deep -s - "$APP"
-# XGworks data: put your XGworks V4.0 folder as ~/XG4 (or next to the app as XG4,
-# or set XGWORKS_DIR).
-echo "built $APP ($VERSION)"
+# The app's folder: everything it needs sits next to it (found automatically).
+mkdir -p "$DIST/XG4" "$DIST/Songs" "$DIST/Settings" "$DIST/Fonts"
+cat > "$DIST/XG4/README.txt" <<'TXT'
+Copy the files of your XGworks V4.0 installation here (ws.ini, inst.ini,
+Drum Kit.ini, Melody.ini and the other *.ini files, XGworks.exe and the
+XGEditor folder). XGWorks NextGen finds them here automatically.
+TXT
+cat > "$DIST/Fonts/README.txt" <<'TXT'
+Optional: put msgothic.ttc here for the List window font like the original.
+TXT
+cat > "$DIST/Songs/README.txt" <<'TXT'
+Your songs (.XWS / .MID). Open and Save start in this folder.
+TXT
+echo "built $DIST ($VERSION)"

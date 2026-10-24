@@ -1365,7 +1365,7 @@ fn list_row_h(ctx: &egui::Context, f: &FontId) -> f32 {
 pub fn set_list_font(ctx: &egui::Context, bytes: Option<Vec<u8>>, px: f32) {
     FONT_PX.store(px.to_bits(), std::sync::atomic::Ordering::Relaxed);
     let mut defs = egui::FontDefinitions::default();
-    let data = bytes.or_else(|| crate::platform::read(std::path::Path::new(crate::platform::LIST_FONT)));
+    let data = bytes.or_else(|| crate::platform::read(&crate::platform::list_font_path()));
     if let Some(b) = data {
         defs.font_data.insert("listfont".into(), egui::FontData { font: b.into(), index: 0, tweak: Default::default() });
         let mut fam = vec!["listfont".to_string()];
@@ -1419,7 +1419,7 @@ pub fn font_family_name(b: &[u8]) -> Option<String> {
 
 /// Register MS Gothic (from the Windows fonts) as the "list" family.
 pub fn install_font(ctx: &egui::Context) {
-    let Some(bytes) = crate::platform::read(std::path::Path::new(crate::platform::LIST_FONT)) else { return };
+    let Some(bytes) = crate::platform::read(&crate::platform::list_font_path()) else { return };
     let mut defs = egui::FontDefinitions::default();
     defs.font_data.insert("msgothic".into(), egui::FontData { font: bytes.into(), index: 0, tweak: Default::default() });
     let mut fam = vec!["msgothic".to_string()];
