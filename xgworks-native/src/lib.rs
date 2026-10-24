@@ -9,6 +9,7 @@ mod cursors;
 mod icons;
 mod jobwin;
 mod listwin;
+mod lyricwin;
 mod midiio;
 mod mixwin;
 mod peres;

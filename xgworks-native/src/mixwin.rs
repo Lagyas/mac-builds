@@ -439,7 +439,8 @@ impl Mixer {
             let sx = ch as f32 * PITCH;
             // level meter
             let lvl = self.meters[ch].round().clamp(0.0, 16.0) as u32;
-            if lvl > 0 && !self.spr(&p, o, BM_METER + lvl, (sx + METER.0, METER.1)) {
+            // the black meter is always shown (3201 = empty), green only while events play
+            if !self.spr(&p, o, BM_METER + lvl, (sx + METER.0, METER.1)) {
                 let r = Rect::from_min_size(o + vec2(sx + METER.0, METER.1), vec2(8.0, 53.0));
                 p.rect_filled(r, 0.0, Color32::BLACK);
                 let h = 53.0 * lvl as f32 / 16.0;

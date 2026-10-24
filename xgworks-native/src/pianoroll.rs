@@ -16,6 +16,88 @@ use xgworks_core::{EditNote, EditTrack, Event};
 
 use crate::icons;
 
+/// Drum window (Drum.hlp, ref. orig_shots/drum_2.png): the same window as the
+/// Piano Roll, but rows are drum instruments in the order of XGworks'
+/// inst.ini [User] (Brush…, cymbals, hi-hats, snares, kicks, toms,
+/// percussion), with the kit's instrument names on the left buttons, and
+/// notes drawn as "drum marks" (balls sized by velocity, coloured by kind).
+#[derive(Clone)]
+pub struct DrumMap {
+    /// Row (top = 0) → note number.
+    pub order: [u8; 128],
+    /// Instrument name per note ("************" = none).
+    pub names: Vec<String>,
+    /// Kind per note (inst.ini InstColor): 0 snare/brush, 1 percussion,
+    /// 2 kick, 3 hi-hat, 4 cymbal, 5 tom.
+    pub kinds: [u8; 128],
+}
+
+impl DrumMap {
+    /// From inst.ini (order + kinds) and a name lookup for the kit.
+    pub fn new(inst_ini: &str, name: impl Fn(u8) -> Option<String>) -> DrumMap {
+        let mut order: Vec<u8> = Vec::new();
+        let mut kinds = [1u8; 128];
+        let mut in_user = false;
+        for line in inst_ini.lines() {
+            let l = line.trim();
+            if l.starts_with('[') {
+                in_user = l.eq_ignore_ascii_case("[User]");
+                continue;
+            }
+            if !in_user {
+                continue;
+            }
+            let Some((k, v)) = l.split_once('=') else { continue };
+            if let Some(row) = k.strip_prefix("InstColor").and_then(|r| r.parse::<usize>().ok()) {
+                if let Some(&n) = order.get(row) {
+                    kinds[n as usize] = v.trim().parse().unwrap_or(1);
+                }
+            } else if k.parse::<usize>().is_ok() {
+                let digits: String = v.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(n) = digits.parse::<u8>() {
+                    if n < 128 && !order.contains(&n) {
+                        order.push(n);
+                    }
+                }
+            }
+        }
+        if order.is_empty() {
+            // no inst.ini: plain order, highest note on top like the Piano Roll
+            order = (0..128u8).rev().collect();
+            for (n, k) in kinds.iter_mut().enumerate() {
+                *k = match n {
+                    35 | 36 => 2,
+                    42 | 44 | 46 => 3,
+                    49 | 51 | 52 | 53 | 55 | 57 | 59 => 4,
+                    41 | 43 | 45 | 47 | 48 | 50 => 5,
+                    37 | 38 | 40 => 0,
+                    _ => 1,
+                };
+            }
+        }
+        for n in 0..128u8 {
+            if !order.contains(&n) {
+                order.push(n);
+            }
+        }
+        let mut o = [0u8; 128];
+        o.copy_from_slice(&order[..128]);
+        let names = (0..128u8).map(|n| name(n).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "************".into())).collect();
+        DrumMap { order: o, names, kinds }
+    }
+
+    fn colour(&self, note: u8) -> Color32 {
+        match self.kinds[note as usize & 127] {
+            0 => Color32::from_rgb(20, 40, 230),
+            2 => Color32::from_rgb(70, 70, 70),
+            3 => Color32::from_rgb(255, 110, 20),
+            4 => Color32::from_rgb(220, 40, 220),
+            5 => Color32::from_rgb(70, 160, 255),
+            _ => Color32::from_rgb(40, 170, 60),
+        }
+    }
+}
+
 const KEY_W: f32 = 120.0;
 const RULER_H: f32 = 18.0;
 const CTRL_H: f32 = 72.0;
@@ -201,9 +283,19 @@ pub struct RollState {
     cursor: u32,
     undo: Vec<(Vec<EditNote>, Vec<Event>)>,
     redo: Vec<(Vec<EditNote>, Vec<Event>)>,
+    /// Some = Drum window (rows = drum instruments), refreshed by the app.
+    pub drum: Option<DrumMap>,
 }
 
 impl RollState {
+    pub fn new_drum(track: usize, map: DrumMap) -> Self {
+        let mut st = RollState::new(track);
+        st.key_h = 24.0;
+        st.tool = Tool::Pencil;
+        st.drum = Some(map);
+        st
+    }
+
     pub fn new(track: usize) -> Self {
         RollState {
             track,
@@ -230,6 +322,7 @@ impl RollState {
             cursor: 0,
             undo: Vec::new(),
             redo: Vec::new(),
+            drum: None,
         }
     }
 }
@@ -245,6 +338,8 @@ pub struct RollCtx<'a> {
     pub play_tick: Option<f32>,
     /// Shared note clipboard (all piano rolls): notes relative to tick 0.
     pub clipboard: &'a std::cell::RefCell<Vec<EditNote>>,
+    /// Play a note of the track for monitoring (note, velocity).
+    pub monitor: &'a dyn Fn(u8, u8),
 }
 
 /// Sort notes by (tick, pitch) and remap the selection to the new order.
@@ -314,6 +409,23 @@ impl RollState {
         let ppqn = cx.ppqn.max(1);
         self.ppqn = ppqn;
         let step = self.step(ppqn);
+        // "virtual pitch": the Drum window's row order mapped onto 127..0
+        let mut vmap = [0u8; 128];
+        let mut rmap = [0u8; 128];
+        for i in 0..128u8 {
+            vmap[i as usize] = i;
+            rmap[i as usize] = i;
+        }
+        if let Some(d) = &self.drum {
+            for (row, &note) in d.order.iter().enumerate() {
+                let v = 127 - row as u8;
+                vmap[note as usize] = v;
+                rmap[v as usize] = note;
+            }
+        }
+        let is_drum = self.drum.is_some();
+        let vp = move |n: u8| vmap[n as usize & 127];
+        let rp = move |v: u8| rmap[v as usize & 127];
 
         // layout: ruler, notes, controller pane, tool bar, status
         let avail = ui.available_rect_before_wrap();
@@ -325,7 +437,7 @@ impl RollState {
         if !self.fitted {
             self.px_per_tick = (grid_w / cx.total_ticks.max(ppqn * 16) as f32).max(0.05);
             let t = &tracks[self.track];
-            if let (Some(lo), Some(hi)) = (t.notes.iter().map(|n| n.pitch).min(), t.notes.iter().map(|n| n.pitch).max()) {
+            if let (Some(lo), Some(hi)) = (t.notes.iter().map(|n| vp(n.pitch)).min(), t.notes.iter().map(|n| vp(n.pitch)).max()) {
                 let rows = notes.height() / self.key_h;
                 self.top_pitch = ((lo as f32 + hi as f32) / 2.0 + rows / 2.0).clamp(rows, 127.0);
             }
@@ -406,6 +518,21 @@ impl RollState {
         for pi in first..=last {
             let y = y_of(pi);
             let row = Rect::from_min_size(Pos2::new(gx0, y), Vec2::new(notes.right() - gx0, key_h));
+            if let Some(d) = &self.drum {
+                // striped rows, instrument buttons with the kit's names
+                let note = rp(pi);
+                if pi % 2 == 0 {
+                    p.rect_filled(row, 0.0, Color32::from_gray(200));
+                }
+                let btn = Rect::from_min_max(Pos2::new(kb.left() + 1.0, y + 1.0), Pos2::new(gx0 - 2.0, y + key_h - 1.0));
+                p.rect_filled(btn, 0.0, Color32::from_gray(236));
+                p.rect_stroke(btn, 0.0, Stroke::new(1.0_f32, Color32::from_gray(120)));
+                let sw = Rect::from_min_size(Pos2::new(btn.left() + 3.0, btn.center().y - 5.0), Vec2::splat(10.0));
+                p.circle_filled(sw.center(), 4.5, d.colour(note));
+                p.text(Pos2::new(sw.right() + 4.0, btn.center().y), egui::Align2::LEFT_CENTER, &d.names[note as usize],
+                    egui::FontId::proportional((key_h * 0.55).clamp(8.0, 12.0)), Color32::BLACK);
+                continue;
+            }
             if is_black(pi) {
                 p.rect_filled(row, 0.0, Color32::from_gray(192));
                 p.rect_filled(Rect::from_min_size(Pos2::new(kb.left(), y + 1.0), Vec2::new(KEY_W * 0.5, key_h - 2.0)), 1.0, Color32::BLACK);
@@ -434,15 +561,27 @@ impl RollState {
 
         // notes
         let trk_ch = tracks[self.track].channel & 0x0F;
+        let mark_r = |vel: u8| (key_h * 0.5 - 2.0).max(3.0) * (0.45 + 0.55 * vel as f32 / 127.0);
         let note_rect = |n: &EditNote| {
+            if is_drum {
+                let c = Pos2::new(x_of(n.tick), y_of(vp(n.pitch)) + key_h / 2.0);
+                return Rect::from_center_size(c, Vec2::splat(2.0 * mark_r(n.vel).max(4.0)));
+            }
             let x = x_of(n.tick).max(gx0);
-            Rect::from_min_max(Pos2::new(x, y_of(n.pitch) + 1.0), Pos2::new(x_of(n.tick + n.dur).max(x + 2.0), y_of(n.pitch) + key_h - 1.0))
+            Rect::from_min_max(Pos2::new(x, y_of(vp(n.pitch)) + 1.0), Pos2::new(x_of(n.tick + n.dur).max(x + 2.0), y_of(vp(n.pitch)) + key_h - 1.0))
         };
         {
             let trk = &tracks[self.track];
             for (i, n) in trk.notes.iter().enumerate() {
                 let r = note_rect(n);
                 if r.right() < gx0 || r.left() > notes.right() || r.bottom() < notes.top() || r.top() > notes.bottom() {
+                    continue;
+                }
+                if let Some(d) = &self.drum {
+                    let col = if self.sel.contains(&i) { SEL_NOTE } else { d.colour(n.pitch) };
+                    let rad = mark_r(n.vel);
+                    p.circle_filled(r.center(), rad, col);
+                    p.circle_filled(r.center() - Vec2::splat(rad * 0.35), rad * 0.3, Color32::from_white_alpha(140));
                     continue;
                 }
                 p.rect_filled(r, 2.0, if self.sel.contains(&i) { SEL_NOTE } else { BLUE_NOTE });
@@ -452,16 +591,27 @@ impl RollState {
         // note-area interaction
         let grid_rect = Rect::from_min_max(Pos2::new(gx0, notes.top()), notes.max);
         let resp = ui.interact(grid_rect, ui.id().with(("roll_grid", self.track)), Sense::click_and_drag());
-        let kb_resp = ui.interact(kb, ui.id().with(("roll_kb", self.track)), Sense::hover());
+        let kb_resp = ui.interact(kb, ui.id().with(("roll_kb", self.track)), Sense::click());
+        if let Some(pos) = kb_resp.interact_pointer_pos().filter(|_| kb_resp.clicked()) {
+            let n = rp(pitch_of(pos.y));
+            (cx.monitor)(n, self.new_vel);
+            if is_drum && kb_resp.double_clicked() {
+                // double-click an instrument button = select its whole row
+                self.sel = (0..tracks[self.track].notes.len()).filter(|&i| tracks[self.track].notes[i].pitch == n).collect();
+            }
+        }
         if let Some(pos) = resp.hover_pos().or(kb_resp.hover_pos()) {
-            let pi = pitch_of(pos.y);
-            self.hover = format!("{}({})", note_name(pi), pi);
+            let pi = rp(pitch_of(pos.y));
+            self.hover = match &self.drum {
+                Some(d) => format!("{}  {}({})", d.names[pi as usize].trim(), note_name(pi), pi),
+                None => format!("{}({})", note_name(pi), pi),
+            };
             if resp.hovered() {
                 self.hover = format!("{}   {}", self.hover, pos_text(tick_of(pos.x), ppqn));
             }
         }
         let hit = |pos: Pos2, notes: &[EditNote]| notes.iter().rposition(|n| note_rect(n).contains(pos));
-        let near_end = |pos: Pos2, n: &EditNote| (note_rect(n).right() - pos.x).abs() <= 4.0;
+        let near_end = |pos: Pos2, n: &EditNote| !is_drum && (note_rect(n).right() - pos.x).abs() <= 4.0;
         let tr = &mut tracks[self.track];
         // a click in the grid takes the keyboard back from the toolbar fields,
         // otherwise Del / Ctrl+C / Ctrl+V would keep going to a DragValue
@@ -512,13 +662,19 @@ impl RollState {
                             self.sel.push(i);
                         }
                     }
-                    Some(i) => self.sel = vec![i],
+                    Some(i) => {
+                        self.sel = vec![i];
+                        (cx.monitor)(tr.notes[i].pitch, tr.notes[i].vel);
+                    }
                     None if self.tool == Tool::Pencil => {
                         // click on empty grid with the pencil: one note of the quantize length
                         self.snapshot(tr);
                         let raw = tick_of(pos.x);
                         let st = if step <= 1 { raw } else { raw / step * step };
-                        tr.notes.push(EditNote { tick: st, dur: step.max(ppqn / 4), pitch: pitch_of(pos.y), vel: self.new_vel });
+                        let pitch = rp(pitch_of(pos.y));
+                        let dur = if is_drum { (step.max(ppqn / 4) / 2).max(1) } else { step.max(ppqn / 4) };
+                        tr.notes.push(EditNote { tick: st, dur, pitch, vel: self.new_vel });
+                        (cx.monitor)(pitch, self.new_vel);
                         self.sel = vec![tr.notes.len() - 1];
                         self.cursor = st;
                         changed = true;
@@ -535,7 +691,7 @@ impl RollState {
         if resp.drag_started_by(egui::PointerButton::Primary) {
             if let Some(pos) = press.or(resp.interact_pointer_pos()) {
                 let raw = tick_of(pos.x);
-                let pi = pitch_of(pos.y);
+                let pi = pitch_of(pos.y); // virtual (row) pitch
                 match (self.tool, hit(pos, &tr.notes)) {
                     (Tool::Eraser, _) => self.drag = Drag::Rubber { from: pos },
                     (_, Some(i)) => {
@@ -547,12 +703,13 @@ impl RollState {
                         self.drag = if near_end(pos, n) {
                             Drag::Resize { anchor: i, dlen: (n.tick + n.dur) as i64 - raw as i64 }
                         } else {
-                            Drag::Move { dtick: n.tick as i64 - raw as i64, dpitch: n.pitch as i32 - pi as i32, anchor: i }
+                            Drag::Move { dtick: n.tick as i64 - raw as i64, dpitch: vp(n.pitch) as i32 - pi as i32, anchor: i }
                         };
                     }
+                    (Tool::Pencil, None) if is_drum => self.drag = Drag::Rubber { from: pos },
                     (Tool::Pencil, None) => {
                         let st = if step <= 1 { raw } else { raw / step * step };
-                        self.drag = Drag::Create { pitch: pi, start: st, cur: st + step.max(ppqn / 4) };
+                        self.drag = Drag::Create { pitch: rp(pi), start: st, cur: st + step.max(ppqn / 4) };
                     }
                     (Tool::Select, None) => self.drag = Drag::Rubber { from: pos },
                 }
@@ -564,12 +721,17 @@ impl RollState {
                     Drag::Move { dtick, dpitch, anchor } if anchor < tr.notes.len() => {
                         let nt = snap(((tick_of(pos.x) as i64 + dtick).max(0)) as u32) as i64;
                         let np = (pitch_of(pos.y) as i32 + dpitch).clamp(0, 127);
-                        let (dt, dp) = (nt - tr.notes[anchor].tick as i64, np - tr.notes[anchor].pitch as i32);
+                        let (dt, dp) = (nt - tr.notes[anchor].tick as i64, np - vp(tr.notes[anchor].pitch) as i32);
                         if dt != 0 || dp != 0 {
                             for &i in &self.sel {
                                 if let Some(n) = tr.notes.get_mut(i) {
                                     n.tick = (n.tick as i64 + dt).max(0) as u32;
-                                    n.pitch = (n.pitch as i32 + dp).clamp(0, 127) as u8;
+                                    n.pitch = rp((vp(n.pitch) as i32 + dp).clamp(0, 127) as u8);
+                                }
+                            }
+                            if dp != 0 {
+                                if let Some(n) = tr.notes.get(anchor) {
+                                    (cx.monitor)(n.pitch, n.vel);
                                 }
                             }
                             changed = true;
@@ -705,7 +867,7 @@ impl RollState {
                 let dt: i64 = if right { step.max(1) as i64 } else if left { -(step.max(1) as i64) } else { 0 };
                 for &i in &self.sel {
                     if let Some(n) = tr.notes.get_mut(i) {
-                        n.pitch = (n.pitch as i32 + dp).clamp(0, 127) as u8;
+                        n.pitch = rp((vp(n.pitch) as i32 + dp).clamp(0, 127) as u8);
                         n.tick = (n.tick as i64 + dt).max(0) as u32;
                     }
                 }

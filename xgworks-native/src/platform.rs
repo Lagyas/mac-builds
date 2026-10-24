@@ -66,7 +66,11 @@ pub fn xg4_dir() -> PathBuf {
         if let Some(d) = std::env::var_os("XGWORKS_DIR") {
             return PathBuf::from(d);
         }
-        let mut c = vec![PathBuf::from(XG4_DIR)];
+        let mut c = Vec::new();
+        if let Some(d) = settings_path().and_then(|p| std::fs::read_to_string(p.with_file_name("xg4_dir.txt")).ok()) {
+            c.push(PathBuf::from(d.trim()));
+        }
+        c.push(PathBuf::from(XG4_DIR));
         if let Some(h) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
             let h = PathBuf::from(h);
             c.push(h.join("XG4"));
@@ -79,6 +83,24 @@ pub fn xg4_dir() -> PathBuf {
         c.into_iter().find(|d| d.join("ws.ini").is_file()).unwrap_or_else(|| PathBuf::from(XG4_DIR))
     })
     .clone()
+}
+
+/// Whether the XGworks data folder was found (it has ws.ini).
+pub fn xg4_found() -> bool {
+    read(&xg4("ws.ini")).is_some()
+}
+
+/// Ask for the XGworks V4.0 folder (the one with ws.ini and XGEditor\) and
+/// remember it; used from the next start.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn pick_xg4_dir() -> Option<PathBuf> {
+    let d = rfd::FileDialog::new().set_title("Choose the XGworks V4.0 folder (with ws.ini)").pick_folder()?;
+    let p = settings_path()?.with_file_name("xg4_dir.txt");
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(p, d.to_string_lossy().as_bytes()).ok()?;
+    Some(d)
 }
 
 #[cfg(target_arch = "wasm32")]

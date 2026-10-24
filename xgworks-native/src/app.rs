@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::platform::{self, Instant};
 use crate::player::{self, open_device, send_dev, send_shared, PlayHandle, SharedOut};
-use crate::{clip, icons, jobwin, listwin, midiio, mixwin, pianoroll, pluginwin, xfwin, xged};
+use crate::{clip, icons, jobwin, listwin, lyricwin, midiio, mixwin, pianoroll, pluginwin, xfwin, xged};
 
 use eframe::egui;
 use xgworks_core::mixer::{self, PartMix};
@@ -28,6 +28,13 @@ fn apply_args(app: &mut App, args: &[String]) {
                     }
                 }
             }
+            "--drum" => {
+                if let Some(n) = it.next().and_then(|n| n.parse::<usize>().ok()) {
+                    if let Some(&ti) = app.visible_tracks().get(n.saturating_sub(1)) {
+                        app.open_drum(ti);
+                    }
+                }
+            }
             "--list" => {
                 if let Some(n) = it.next().and_then(|n| n.parse::<usize>().ok()) {
                     if let Some(&ti) = app.visible_tracks().get(n.saturating_sub(1)) {
@@ -36,6 +43,7 @@ fn apply_args(app: &mut App, args: &[String]) {
                 }
             }
             "--mixer" => app.show_mixer = true,
+            "--lyrics" => app.open_lyrics(),
             "--xg" => app.show_xg = true,
             "--autoplay" | "--importer" => {
                 let files = it.next().and_then(|f| platform::read(std::path::Path::new(f))).map(|b| pluginwin::list_files(&b)).unwrap_or_default();
@@ -102,6 +110,18 @@ struct App {
     pmax: u8,
     playing: bool,
     play_start: Option<Instant>,
+    /// Song position (tick) while stopped; playing starts here.
+    song_pos: u32,
+    /// Tick the running playback started from, and the song's tempo map.
+    play_from: u32,
+    play_tm: Option<xgworks_core::listev::TimeMap>,
+    /// Left / right locators (loop start / end), ticks.
+    loc_l: u32,
+    loc_r: u32,
+    loop_on: bool,
+    /// Numpad 2 jumps back this many bars (Preferences, 2..4).
+    rewind_bars: u32,
+    show_prefs: bool,
     player: Option<PlayHandle>,
     /// A song chosen in the Open dialog, loaded on the next frame.
     picked: platform::Picked,
@@ -124,6 +144,8 @@ struct App {
     list_areas: std::cell::RefCell<Vec<(u64, egui::Rect)>>,
     list_drop: std::cell::RefCell<Option<(u64, Vec<(u32, Event)>)>>,
     list_names: xgworks_core::listev::ListNames,
+    /// XGworks' inst.ini (Drum window rows), cp932 text.
+    inst_ini: String,
     /// List font (name, px; name "" = default) and whether it must be (re)applied.
     list_font: std::cell::RefCell<(String, f32)>,
     list_font_changed: std::cell::Cell<bool>,
@@ -138,6 +160,8 @@ struct App {
     trns_edit: Option<(usize, String)>,
     /// XF Information Editor (Job menu), open while Some.
     xf_dlg: Option<xfwin::XfDialog>,
+    /// Lyrics / karaoke editor window, open while Some.
+    lyrics: Option<lyricwin::LyricsState>,
     /// Plug-in windows (Auto Play, Importer), open while Some.
     autoplay: Option<pluginwin::AutoPlay>,
     importer: Option<pluginwin::Importer>,
@@ -218,6 +242,14 @@ impl App {
             play_len_ms: 0.0,
             monitoring: false,
             play_start: None,
+            song_pos: 0,
+            play_from: 0,
+            play_tm: None,
+            loc_l: 0,
+            loc_r: 0,
+            loop_on: false,
+            rewind_bars: 2,
+            show_prefs: false,
             player: None,
             picked: Default::default(),
             file_name: String::new(),
@@ -235,6 +267,7 @@ impl App {
             list_areas: Default::default(),
             list_drop: Default::default(),
             list_names: load_list_names(),
+            inst_ini: platform::read(&platform::xg4("inst.ini")).map(|b| b.iter().map(|&c| if c < 0x80 { c as char } else { '?' }).collect()).unwrap_or_default(),
             list_xg: Default::default(),
             list_font: std::cell::RefCell::new((String::new(), 0.0)),
             list_font_changed: std::cell::Cell::new(false),
@@ -246,6 +279,7 @@ impl App {
             port_combo: None,
             jobs: jobwin::JobState::new(&platform::read(&platform::xg4("JobDll.ini")).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()),
             xf_dlg: None,
+            lyrics: None,
             tv_tool: TvTool::Arrow,
             tv_drag: None,
             bond_first: None,
@@ -277,6 +311,13 @@ impl App {
             app.parse_settings(&text);
         }
         app.refresh_outputs();
+        if !cfg!(target_arch = "wasm32") && !platform::xg4_found() {
+            app.show_prefs = true;
+            app.status = format!(
+                "XGworks data not found ({}). Choose your XGworks V4.0 folder in Preferences (⚙) and restart.",
+                platform::xg4_dir().display()
+            );
+        }
         app
     }
 
@@ -306,6 +347,8 @@ impl App {
                     }
                     devs[n - 1] = v.to_string();
                 }
+            } else if k == "Rewind Bars" {
+                self.rewind_bars = v.parse::<u32>().unwrap_or(2).clamp(2, 4);
             } else if k == "Font" {
                 if v != self.list_font.borrow().0 {
                     self.list_font.borrow_mut().0 = v.to_string();
@@ -371,7 +414,7 @@ impl App {
         for (k, d) in devs.iter().enumerate() {
             t += &format!("Midi Out Dev{}={d}\r\n", k + 1);
         }
-        t += &format!("[User Settings]\r\nMIX OUTPORT={}\r\n", self.mix_port);
+        t += &format!("[User Settings]\r\nMIX OUTPORT={}\r\nRewind Bars={}\r\n", self.mix_port, self.rewind_bars);
         let x = *self.list_xg.borrow();
         let bit = |b: bool| if b { '1' } else { '0' };
         t += &format!("[List]\r\nXG Disp={}{}{}{}\r\n", bit(x.sysex), bit(x.note), bit(x.cc), bit(x.prog));
@@ -491,14 +534,18 @@ impl App {
             self.status = "No file loaded or no MIDI output.".into();
             return;
         }
-        self.stop();
+        self.halt();
         self.sync_audible();
         self.monitoring = other.is_some();
         let (tracks, ppqn) = match other {
             Some((t, p)) => (t, p),
             None => (self.edit.clone(), self.ppqn),
         };
-        let msgs = edit_playback_plan(&tracks, ppqn);
+        let from = if self.monitoring { 0 } else { self.song_pos };
+        let tm = xgworks_core::listev::TimeMap::new(&tracks, ppqn);
+        let msgs = transport::from_position(edit_playback_plan(&tracks, ppqn), tm.to_ms(from));
+        self.play_from = from;
+        self.play_tm = Some(tm);
         self.play_len_ms = msgs.last().map_or(0.0, |m| m.0);
 
         if !self.ensure_midi() {
@@ -537,7 +584,16 @@ impl App {
         }
     }
 
+    /// Stop; the song position stays where playback was.
     fn stop(&mut self) {
+        if self.playing && !self.monitoring {
+            self.song_pos = self.cur_tick().min(self.total_ticks);
+        }
+        self.halt();
+    }
+
+    /// Stop the player without moving the song position.
+    fn halt(&mut self) {
         if let Some(p) = self.player.take() {
             p.stop();
         }
@@ -597,6 +653,9 @@ impl App {
     }
 }
 
+#[path = "transport.rs"]
+mod transport;
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let picked = self.picked.borrow_mut().take();
@@ -604,6 +663,9 @@ impl eframe::App for App {
             self.load(&bytes, &name);
         }
         track_key_focus(ctx);
+        self.transport_keys(ctx);
+        self.loop_check();
+        self.prefs_window(ctx);
         if cfg!(target_arch = "wasm32") && !self.playing {
             let now = ctx.input(|i| i.time);
             if now - self.out_poll > 1.0 {
@@ -623,7 +685,8 @@ impl eframe::App for App {
         if self.playing {
             if let Some(st) = self.play_start {
                 if st.elapsed().as_secs_f64() * 1000.0 > self.play_len_ms + 400.0 {
-                    self.stop();
+                    self.halt();
+                    self.song_pos = 0;
                     self.status = "Finished.".into();
                     self.autoplay_next();
                 }
@@ -666,13 +729,8 @@ impl eframe::App for App {
                     self.refresh_outputs();
                 }
                 ui.separator();
-                if ui.add_enabled(has && !self.playing, egui::Button::new("▶ Play")).clicked() {
-                    self.play();
-                }
-                if ui.add_enabled(self.playing, egui::Button::new("■ Stop")).clicked() {
-                    self.stop();
-                    self.status = "Stopped.".into();
-                }
+                self.transport_bar(ui);
+                ui.end_row();
                 ui.separator();
                 ui.add_enabled_ui(has, |ui| {
                     ui.menu_button("Job", |ui| {
@@ -699,6 +757,40 @@ impl eframe::App for App {
                         ui.close_menu();
                     }
                 });
+                ui.menu_button("Window", |ui| {
+                    let t = self.sel_track;
+                    let has_t = t < self.edit.len();
+                    if ui.add_enabled(has_t, egui::Button::new("Event List (List)      F2")).clicked() {
+                        self.list_from_selection();
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(has_t, egui::Button::new("Piano Roll             F3")).clicked() {
+                        self.open_roll(t);
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(has_t, egui::Button::new("Drum                   F5")).clicked() {
+                        self.open_drum(t);
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(has, egui::Button::new("Mixer                  F6")).clicked() {
+                        self.show_mixer = true;
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(has, egui::Button::new("XG Editor              F7")).clicked() {
+                        self.show_xg = true;
+                        self.xg.sync_from_song(&self.edit);
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(has, egui::Button::new("Lyrics / Karaoke       F8")).clicked() {
+                        self.open_lyrics();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new("For the track selected in the Track View").small());
+                });
+                if ui.button("⚙").on_hover_text("Preferences").clicked() {
+                    self.show_prefs = true;
+                }
                 ui.menu_button("Help", |ui| {
                     ui.label(egui::RichText::new(crate::version::about()).monospace());
                     ui.separator();
@@ -707,7 +799,7 @@ impl eframe::App for App {
                         ui.close_menu();
                     }
                 });
-                if ui.add_enabled(has, egui::Button::new("☰ List")).on_hover_text("List window of the selected blocks (F2)").clicked() {
+                if ui.add_enabled(has, egui::Button::new("☰ Event List")).on_hover_text("Event List (List window) of the selected blocks, else the selected track (F2)").clicked() {
                     self.list_from_selection();
                 }
                 ui.add_enabled_ui(has, |ui| ui.toggle_value(&mut self.show_mixer, "🎚 Mixer"));
@@ -777,21 +869,35 @@ impl eframe::App for App {
         if !self.open_rolls.is_empty() {
             let markers = self.markers();
             let names: Vec<String> = self.edit.iter().map(|t| t.name.clone()).collect();
-            let play_tick = self.play_start.map(|st| (st.elapsed().as_secs_f64() * 1000.0 / self.ms_per_tick) as f32);
+            let play_tick = self.play_tick();
             let visible = self.visible_tracks();
-            let cx = pianoroll::RollCtx {
-                visible: &visible,
-                ppqn: self.ppqn as u32,
-                total_ticks: self.total_ticks,
-                markers: &markers,
-                track_names: &names,
-                play_tick,
-                clipboard: &self.clipboard,
-            };
+            // monitoring: each track's channel on its port's device
+            let outs: Vec<(usize, u8)> = self.edit.iter().map(|t| (self.port_device(t.port()), t.channel & 0x0F)).collect();
             let mut rolls = std::mem::take(&mut self.open_rolls);
+            for (_, st) in rolls.iter_mut().filter(|(_, st)| st.drum.is_some()) {
+                st.drum = Some(self.drum_map(st.track));
+            }
             let mut edited = false;
             rolls.retain_mut(|(id, st)| {
-                let title = format!("Piano Roll:{}", *id + 1);
+                let title = if st.drum.is_some() { format!("Drum:{}", *id + 1) } else { format!("Piano Roll:{}", *id + 1) };
+                let (dev, ch) = outs.get(st.track).copied().unwrap_or((self.sel_out, 0));
+                let midi = self.midi.clone();
+                let monitor = move |note: u8, vel: u8| {
+                    if open_device(&midi, dev) {
+                        send_dev(&midi, dev, &[0x90 | ch, note & 0x7F, vel.clamp(1, 127)]);
+                        send_dev(&midi, dev, &[0x90 | ch, note & 0x7F, 0]);
+                    }
+                };
+                let cx = pianoroll::RollCtx {
+                    visible: &visible,
+                    ppqn: self.ppqn as u32,
+                    total_ticks: self.total_ticks,
+                    markers: &markers,
+                    track_names: &names,
+                    play_tick,
+                    clipboard: &self.clipboard,
+                    monitor: &monitor,
+                };
                 let edit = &mut self.edit;
                 sub_window(ctx, ("roll", *id), &title, [1000.0, 620.0], |ui| edited |= st.ui(ui, edit, &cx))
             });
@@ -859,6 +965,7 @@ impl eframe::App for App {
             }
         }
         self.plugin_windows(ctx);
+        self.lyrics_window(ctx);
         // XF Information Editor
         if let Some(d) = &mut self.xf_dlg {
             match xfwin::ui(ctx, d) {
@@ -903,6 +1010,28 @@ impl eframe::App for App {
 }
 
 /// ws.ini names + voice lists of the original (for the List window).
+/// `note=name` lines of one section of an INI text (inst.ini kits).
+fn ini_section(text: &str, name: &str) -> Vec<(u8, String)> {
+    let head = format!("[{name}]");
+    let mut on = false;
+    let mut out = Vec::new();
+    for l in text.lines() {
+        let l = l.trim();
+        if l.starts_with('[') {
+            on = l.eq_ignore_ascii_case(&head);
+            continue;
+        }
+        if on {
+            if let Some((k, v)) = l.split_once('=') {
+                if let Ok(n) = k.trim().parse::<u8>() {
+                    out.push((n, v.trim().to_string()));
+                }
+            }
+        }
+    }
+    out
+}
+
 fn load_list_names() -> xgworks_core::listev::ListNames {
     let ws = platform::read(&platform::xg4("ws.ini")).unwrap_or_default();
     xgworks_core::listev::ListNames::load(&ws, |name| platform::read(&platform::xg4(name)))
@@ -919,6 +1048,7 @@ fn fixed_window(ctx: &egui::Context, id: impl std::hash::Hash, title: &str, size
         egui::ViewportBuilder::default().with_title(title).with_inner_size(size).with_resizable(false),
         |ctx, _class| {
             egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| body(ui));
+            transport::note_space(ctx);
             if ctx.input(|i| i.viewport().close_requested()) {
                 open = false;
             }
@@ -944,6 +1074,7 @@ fn sub_window(
         egui::ViewportBuilder::default().with_title(title).with_inner_size(size),
         |ctx, _class| {
             egui::CentralPanel::default().show(ctx, |ui| body(ui));
+            transport::note_space(ctx);
             if ctx.input(|i| i.viewport().close_requested()) {
                 open = false;
             }
@@ -1287,7 +1418,7 @@ impl App {
         }
         self.draw_playhead(&p, ruler, t0, ppt);
         let ruler_resp = ui.interact(ruler, ui.id().with("tv_ruler"), egui::Sense::click());
-        let _ = ruler_resp;
+        self.ruler_input(ui, &ruler_resp, |x| ((x - tl.left()) / ppt + t0).max(0.0) as u32, |t| tl.left() + (t as f32 - t0) * ppt);
 
         // ---- track rows (pool rows after the used tracks, like the original)
         let bottom_lanes = 2.0 * ROW_H * 2.0;
@@ -1545,6 +1676,24 @@ impl App {
         if ctx.input(|i| i.key_pressed(egui::Key::F2)) {
             self.list_from_selection();
         }
+        if ctx.input(|i| i.key_pressed(egui::Key::F3)) && self.sel_track < self.edit.len() {
+            self.open_roll(self.sel_track);
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
+            self.open_drum(self.sel_track);
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::F6)) {
+            self.show_mixer = !self.show_mixer;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::F8)) {
+            self.open_lyrics();
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::F7)) {
+            self.show_xg = !self.show_xg;
+            if self.show_xg {
+                self.xg.sync_from_song(&self.edit);
+            }
+        }
         let k = clip::edit_keys(ctx);
         if k.all {
             let vis = self.visible_tracks();
@@ -1792,8 +1941,8 @@ impl App {
     }
 
     fn draw_playhead(&self, p: &egui::Painter, r: egui::Rect, t0: f32, ppt: f32) {
-        if let Some(st) = self.play_start {
-            let tick = (st.elapsed().as_secs_f64() * 1000.0 / self.ms_per_tick) as f32;
+        if !self.edit.is_empty() {
+            let tick = self.cur_tick() as f32;
             let x = r.left() + (tick - t0) * ppt;
             if x >= r.left() && x <= r.right() {
                 p.line_segment([egui::pos2(x, r.top()), egui::pos2(x, r.bottom())],
@@ -1820,6 +1969,77 @@ impl App {
             spans.push(listwin::Span { track: self.sel_track, block: None });
         }
         self.open_list(spans);
+    }
+
+    /// Lyrics editor: on the first track with lyric events, else the selected one.
+    fn open_lyrics(&mut self) {
+        if self.edit.is_empty() || self.lyrics.is_some() {
+            return;
+        }
+        let vis = self.visible_tracks();
+        let t = vis
+            .iter()
+            .copied()
+            .find(|&i| self.edit[i].others.iter().any(|e| matches!(e, Event::Meta { mtype: lyricwin::LYRIC, .. })))
+            .unwrap_or(self.sel_track.min(self.edit.len() - 1));
+        self.lyrics = Some(lyricwin::LyricsState::new(t));
+    }
+
+    /// Lyrics window and its actions.
+    fn lyrics_window(&mut self, ctx: &egui::Context) {
+        let Some(mut st) = self.lyrics.take() else { return };
+        let vis = self.visible_tracks();
+        let tm = self.time_map();
+        let pos = self.cur_tick();
+        let playing = self.playing;
+        let mut acts = Vec::new();
+        let open = sub_window(ctx, "lyrics", "Lyrics / Karaoke", [900.0, 560.0], |ui| acts = st.ui(ui, &self.edit, &vis, &tm, pos, playing));
+        for a in acts {
+            match a {
+                lyricwin::LyricAction::Edit(f) => {
+                    self.tv_snapshot();
+                    f(&mut self.edit);
+                    let ti = st.track;
+                    self.extend_blocks(ti);
+                    self.song_edited();
+                }
+                lyricwin::LyricAction::Locate(t) => self.locate(t),
+                lyricwin::LyricAction::Status(m) => self.status = m,
+            }
+        }
+        if open {
+            self.lyrics = Some(st);
+        }
+        if self.playing {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Drum window for track `i` (Window ▸ Drum, F5 in the Track View).
+    fn open_drum(&mut self, i: usize) {
+        if i >= self.edit.len() {
+            return;
+        }
+        self.sel_track = i;
+        let map = self.drum_map(i);
+        self.open_rolls.push((self.next_roll_id, pianoroll::RollState::new_drum(i, map)));
+        self.next_roll_id += 1;
+    }
+
+    /// Rows / names / colours of the Drum window: XGworks' inst.ini row
+    /// order, names of the track's drum kit (bank MSB + program; channel 10
+    /// defaults to the drum bank 127), else the Standard Kit's.
+    fn drum_map(&self, i: usize) -> pianoroll::DrumMap {
+        let inst = &self.inst_ini;
+        let (msb, prog) = self.mix.get(i).map_or((0, 0), |m| (m.bank_msb, m.program));
+        let msb = if msb == 0 && self.edit.get(i).is_some_and(|t| t.channel & 0x0F == 9) { 127 } else { msb };
+        let std_kit = ini_section(inst, "Standard Kit");
+        pianoroll::DrumMap::new(inst, |n| {
+            self.list_names
+                .drum(msb, prog, n)
+                .map(|s| s.to_string())
+                .or_else(|| std_kit.iter().find(|(k, _)| *k == n).map(|(_, v)| v.clone()))
+        })
     }
 
     fn open_roll(&mut self, i: usize) {
@@ -1852,7 +2072,7 @@ impl App {
 // ---------------------------------------------------------------------------
 impl App {
     fn play_tick(&self) -> Option<f32> {
-        self.play_start.map(|st| (st.elapsed().as_secs_f64() * 1000.0 / self.ms_per_tick) as f32)
+        self.play_start.map(|_| self.cur_tick() as f32)
     }
 
     fn mixer_actions(&mut self, acts: Vec<mixwin::MixAction>) {

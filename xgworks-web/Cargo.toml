@@ -1,6 +1,6 @@
 [package]
 name = "xgworks-web"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Browser build of XGWorks NextGen: the xgworks-native app (egui) compiled to WebAssembly, Web MIDI output"
 
