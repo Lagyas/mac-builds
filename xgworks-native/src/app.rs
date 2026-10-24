@@ -51,6 +51,7 @@ fn apply_args(app: &mut App, args: &[String]) {
             }
             "--mixer" => app.show_mixer = true,
             "--lyrics" => app.open_lyrics(),
+            "--chord" => app.open_chord_dialog(0),
             "--master" => app.open_master(),
             "--markers" => app.markers_win = Some(markerwin::MarkerState::new()),
             "--xg" => app.show_xg = true,
@@ -196,6 +197,10 @@ struct App {
     lyrics: Option<lyricwin::LyricsState>,
     /// Markers window (Edit ▸ Add Marker / Marker List), open while Some.
     markers_win: Option<markerwin::MarkerState>,
+    /// Chord lane: selected chords (track, index), Chord Insert dialog, drag start tick.
+    chord_sel: Vec<(usize, usize)>,
+    chord_dlg: Option<chordlane::ChordDlg>,
+    chord_drag: Option<u32>,
     /// Plug-in windows (Auto Play, Importer), open while Some.
     autoplay: Option<pluginwin::AutoPlay>,
     importer: Option<pluginwin::Importer>,
@@ -331,6 +336,9 @@ impl App {
             xf_dlg: None,
             lyrics: None,
             markers_win: None,
+            chord_sel: Vec::new(),
+            chord_dlg: None,
+            chord_drag: None,
             tv_tool: TvTool::Arrow,
             tv_drag: None,
             bond_first: None,
@@ -713,6 +721,8 @@ mod fileops;
 mod record;
 #[path = "transport_win.rs"]
 mod transport_win;
+#[path = "chordlane.rs"]
+mod chordlane;
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -830,6 +840,11 @@ impl eframe::App for App {
                         ui.close_menu();
                     }
                     ui.separator();
+                    if ui.add_enabled(has, egui::Button::new("Insert Chord…")).on_hover_text("XF chord at the song position (or click the C lane with the pencil)").clicked() {
+                        let t = self.cur_tick();
+                        self.open_chord_dialog(t);
+                        ui.close_menu();
+                    }
                     if ui.add_enabled(has, egui::Button::new("Add Marker / Marker List…")).clicked() {
                         self.markers_win.get_or_insert_with(markerwin::MarkerState::new);
                         ui.close_menu();
@@ -1080,6 +1095,7 @@ impl eframe::App for App {
         self.plugin_windows(ctx);
         self.lyrics_window(ctx);
         self.markers_window(ctx);
+        self.chord_dialog(ctx);
         // XF Information Editor
         if let Some(d) = &mut self.xf_dlg {
             match xfwin::ui(ctx, d) {
@@ -1605,6 +1621,9 @@ impl App {
             _ => None,
         }).collect();
         chords.sort_by_key(|c| c.0);
+        let c_hdr = egui::Rect::from_min_size(egui::pos2(full.left(), cl.top()), egui::vec2(hdr_w, lane_h));
+        let tick_of = |x: f32| ((x - tl.left()) / ppt + t0).max(0.0) as u32;
+        self.chord_lane_input(ui, chord_lane, c_hdr, &x_of, &tick_of);
         // labels only where they fit (the original thins them out when zoomed out)
         let mut free_x = f32::MIN;
         for (t, c) in &chords {
