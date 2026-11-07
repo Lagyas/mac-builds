@@ -101,6 +101,14 @@ impl DrumMap {
 const KEY_W: f32 = 120.0;
 const RULER_H: f32 = 18.0;
 const CTRL_H: f32 = 72.0;
+/// The time scroll bar under the controller pane, its zoom buttons.
+const SB_H: f32 = 18.0;
+/// Horizontal zoom range (pixels per tick); the buttons double / halve it.
+const PPT_MIN: f32 = 0.01;
+const PPT_MAX: f32 = 4.0;
+/// Vertical zoom range (row height).
+const KEY_H_MIN: f32 = 4.0;
+const KEY_H_MAX: f32 = 24.0;
 
 const BLUE_NOTE: Color32 = Color32::from_rgb(0, 0, 220);
 const SEL_NOTE: Color32 = Color32::from_rgb(220, 0, 0);
@@ -294,6 +302,9 @@ pub struct RollState {
     pub note_len: u32,
     /// Edit ▸ Repeat (Alt+R): [from bar, to bar, insert bar, times].
     repeat: Option<[u32; 4]>,
+    /// The time scale to open with (pixels per quarter note, the last one
+    /// used, from the settings) instead of fitting the song.
+    pub preset_ppq: Option<f32>,
 }
 
 impl RollState {
@@ -311,6 +322,16 @@ impl RollState {
         st.tool = Tool::Pencil;
         st.drum = Some(map);
         st
+    }
+
+    /// The zoom to remember: (pixels per quarter note, row height), once the
+    /// window has been drawn.
+    pub fn zoom(&self) -> Option<(f32, f32)> {
+        self.fitted.then_some((self.px_per_tick * self.ppqn.max(1) as f32, self.key_h))
+    }
+
+    pub fn set_key_h(&mut self, h: f32) {
+        self.key_h = h.clamp(KEY_H_MIN, KEY_H_MAX);
     }
 
     pub fn new(track: usize) -> Self {
@@ -344,6 +365,7 @@ impl RollState {
             export_req: false,
             note_len: 0,
             repeat: None,
+            preset_ppq: None,
         }
     }
 }
@@ -493,13 +515,17 @@ impl RollState {
 
         // layout: ruler, notes, controller pane, tool bar, status
         let avail = ui.available_rect_before_wrap();
-        let bottom_h = CTRL_H + 30.0 + 18.0;
+        // controller pane, time scroll bar, tool bar, status
+        let bottom_h = CTRL_H + SB_H + 4.0 + 30.0 + 18.0;
         let ruler = Rect::from_min_size(avail.min, Vec2::new(avail.width(), RULER_H));
         let notes = Rect::from_min_max(Pos2::new(avail.left(), ruler.bottom()), Pos2::new(avail.right(), avail.bottom() - bottom_h));
         let ctrl = Rect::from_min_size(Pos2::new(avail.left(), notes.bottom() + 2.0), Vec2::new(avail.width(), CTRL_H));
         let grid_w = (avail.width() - KEY_W).max(50.0);
         if !self.fitted {
-            self.px_per_tick = (grid_w / cx.total_ticks.max(ppqn * 16) as f32).max(0.05);
+            self.px_per_tick = match self.preset_ppq {
+                Some(q) => (q / ppqn as f32).clamp(PPT_MIN, PPT_MAX),
+                None => (grid_w / cx.total_ticks.max(ppqn * 16) as f32).max(0.05),
+            };
             let t = &tracks[self.track];
             if let Some(info) = &self.staff {
                 let rows = notes.height() / self.key_h;
@@ -525,7 +551,7 @@ impl RollState {
             if ctrl_m && zoom != 1.0 {
                 let mx = mouse.map_or(0.0, |p| (p.x - gx0).max(0.0));
                 let at = self.t0 + mx / self.px_per_tick;
-                self.px_per_tick = (self.px_per_tick * zoom).clamp(0.01, 4.0);
+                self.px_per_tick = (self.px_per_tick * zoom).clamp(PPT_MIN, PPT_MAX);
                 self.t0 = (at - mx / self.px_per_tick).max(0.0);
             } else if shift || d.x != 0.0 {
                 let dx = if d.x != 0.0 { d.x } else { d.y };
@@ -1084,6 +1110,41 @@ impl RollState {
         // ruler/notes/ctrl were painted directly; reserve their space
         ui.allocate_rect(Rect::from_min_max(avail.min, ctrl.max), Sense::hover());
 
+        // ---------------- time scroll bar, zoom buttons at its end
+        let sb_top = ctrl.bottom() + 2.0;
+        let zw = 22.0;
+        let sb = Rect::from_min_max(Pos2::new(gx0, sb_top), Pos2::new(avail.right() - 4.0 * zw, sb_top + SB_H));
+        let page = grid_w / self.px_per_tick;
+        let total = (cx.total_ticks as f32 + 4.0 * bar as f32).max(self.t0 + page);
+        icons::scroll_bar(ui, sb, false, &mut self.t0, page, total, bar as f32, "roll_hsb");
+        for (k, (idx, tip)) in [
+            (icons::ZOOM_H_OUT, "Horizontal Zoom Out"),
+            (icons::ZOOM_H_IN, "Horizontal Zoom In"),
+            (icons::ZOOM_V_OUT, "Vertical Zoom Out"),
+            (icons::ZOOM_V_IN, "Vertical Zoom In"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let r = Rect::from_min_size(Pos2::new(sb.right() + k as f32 * zw, sb_top), Vec2::new(zw, SB_H));
+            let en = match k {
+                0 => self.px_per_tick > PPT_MIN,
+                1 => self.px_per_tick < PPT_MAX,
+                2 => self.key_h > KEY_H_MIN,
+                _ => self.key_h < KEY_H_MAX,
+            };
+            if icons::icon_button_at(ui, r, icons::MAIN_BAR, idx, en, tip, ("roll_zoom", k)).clicked() {
+                match k {
+                    // the left edge stays
+                    0 => self.px_per_tick = (self.px_per_tick / 2.0).max(PPT_MIN),
+                    1 => self.px_per_tick = (self.px_per_tick * 2.0).min(PPT_MAX),
+                    2 => self.key_h = (self.key_h - 2.0).max(KEY_H_MIN),
+                    _ => self.key_h = (self.key_h + 2.0).min(KEY_H_MAX),
+                }
+            }
+        }
+        ui.allocate_rect(Rect::from_min_max(Pos2::new(avail.left(), sb_top), Pos2::new(avail.right(), sb_top + SB_H)), Sense::hover());
+
         // ---------------- bottom tool bar + status
         ui.horizontal(|ui| {
             // tools + line shapes, icons of the original's bottom bar (bitmap 7200)
@@ -1144,10 +1205,10 @@ impl RollState {
             // icons of the original's top bar (XGworks.exe bitmap 6008)
             ui.spacing_mut().item_spacing.x = 0.0;
             if icons::tool_button(ui, icons::ROLL_TOP, 0, false, "V+", "Zoom in (vertical)").clicked() {
-                self.key_h = (self.key_h + 2.0).min(24.0);
+                self.key_h = (self.key_h + 2.0).min(KEY_H_MAX);
             }
             if icons::tool_button(ui, icons::ROLL_TOP, 1, false, "V-", "Zoom out (vertical)").clicked() {
-                self.key_h = (self.key_h - 2.0).max(4.0);
+                self.key_h = (self.key_h - 2.0).max(KEY_H_MIN);
             }
             ui.add_space(8.0);
             for (k, (q, txt, tip)) in [(0, "FREE", "No quantize"), (4, "1/4", "Quarter note"), (8, "1/8", "8th note"), (16, "1/16", "16th note")].into_iter().enumerate() {

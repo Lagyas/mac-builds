@@ -183,6 +183,8 @@ impl App {
     /// Setup menu: MIDI input, Thru, metronome.
     pub(super) fn setup_menu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("Setup", |ui| {
+            self.zoom_menu(ui);
+            ui.separator();
             ui.label(egui::RichText::new("MIDI input (recording)").strong());
             let names = midiio::input_names();
             let cur = self.in_dev;

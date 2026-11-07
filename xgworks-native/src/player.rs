@@ -37,15 +37,6 @@ pub fn open_device(midi: &SharedOut, dev: usize) -> bool {
     }
 }
 
-/// Send to the default device.
-pub fn send_shared(midi: &SharedOut, bytes: &[u8]) {
-    let mut g = midi.lock().unwrap();
-    let d = g.default;
-    if let Some(c) = g.conns.get_mut(&d) {
-        c.send(bytes);
-    }
-}
-
 pub fn send_dev(midi: &SharedOut, dev: usize, bytes: &[u8]) {
     if let Some(c) = midi.lock().unwrap().conns.get_mut(&dev) {
         c.send(bytes);

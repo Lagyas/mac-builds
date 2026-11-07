@@ -20,9 +20,14 @@ enum Tab {
     Blocks,
 }
 
+#[path = "xgpanel.rs"]
+pub mod xgpanel;
+
 pub struct XgEditor {
     data_dir: PathBuf,
     models: Vec<(String, String, String)>,
+    /// xgeditor.ini's model groups (MU Series, Sound Card, …).
+    tree: Vec<(String, Vec<String>)>,
     sel_model: usize,
     table: Option<XgTable>,
     voices: Vec<Voice>,
@@ -34,6 +39,69 @@ pub struct XgEditor {
     voice_filter: String,
     error: String,
     enums: Enums,
+    /// The main window (original layout) and its dialogs.
+    pub panel: xgpanel::Panel,
+    /// Messages to send without writing them into the song (System On, Transmit).
+    pub sends: Vec<Change>,
+    /// A tool-bar button the app handles (file dialogs, song access).
+    pub tool: Option<XgTool>,
+    /// Record XG Parameter (F11): while the song plays, changes are
+    /// recorded into the recording track at the play position.
+    pub recording: bool,
+    pub setup: XgSetup,
+    reload_model: bool,
+}
+
+/// Tool-bar requests for the app.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum XgTool {
+    Open,
+    Save,
+    Setup,
+    Bulk,
+    Load,
+    Insert,
+}
+
+/// XG Editor Setup (the original keeps it in XGEDITOR.INI).
+#[derive(Clone, Debug, PartialEq)]
+pub struct XgSetup {
+    /// MIDI output port (song port index) for parts 1-16, 17-32, 33-48, 49-64.
+    pub ports: [u8; 4],
+    /// Inserting data: every parameter (All) or only those set (Offset).
+    pub all: bool,
+    /// Clocks between inserted messages.
+    pub interval: u32,
+    /// Device number 0..15 (shown 1..16).
+    pub dev: u8,
+    /// Recording track (1-based track number).
+    pub rec_track: usize,
+    /// While the song plays, the editor follows its XG messages.
+    pub play_monitor: bool,
+}
+
+impl Default for XgSetup {
+    fn default() -> Self {
+        XgSetup { ports: [0, 1, 2, 3], all: false, interval: 1, dev: 0, rec_track: 1, play_monitor: false }
+    }
+}
+
+impl XgSetup {
+    pub fn to_line(&self) -> String {
+        let p = self.ports;
+        format!("{},{},{},{},{},{},{},{},{}", p[0], p[1], p[2], p[3], self.all as u8, self.interval, self.dev, self.rec_track, self.play_monitor as u8)
+    }
+    pub fn from_line(v: &str) -> Option<XgSetup> {
+        let n: Vec<u32> = v.split(',').map(|x| x.trim().parse().ok()).collect::<Option<_>>()?;
+        (n.len() == 9).then(|| XgSetup {
+            ports: [n[0] as u8, n[1] as u8, n[2] as u8, n[3] as u8].map(|p| p.min(15)),
+            all: n[4] != 0,
+            interval: n[5].min(1920),
+            dev: n[6].min(15) as u8,
+            rec_track: (n[7] as usize).max(1),
+            play_monitor: n[8] != 0,
+        })
+    }
 }
 
 /// One parameter change: XG address + data bytes.
@@ -44,6 +112,7 @@ impl XgEditor {
         let mut ed = XgEditor {
             data_dir: crate::platform::xg4("XGEditor"),
             models: Vec::new(),
+            tree: Vec::new(),
             sel_model: 0,
             table: None,
             voices: Vec::new(),
@@ -55,6 +124,12 @@ impl XgEditor {
             voice_filter: String::new(),
             error: String::new(),
             enums: Enums::default(),
+            panel: xgpanel::Panel::default(),
+            sends: Vec::new(),
+            tool: None,
+            recording: false,
+            setup: XgSetup::default(),
+            reload_model: false,
         };
         ed.load_models();
         ed
@@ -69,6 +144,7 @@ impl XgEditor {
         match crate::platform::read(&self.data_dir.join("xgeditor.ini")) {
             Some(b) => {
                 self.models = parse_models(&b);
+                self.tree = xgworks_core::xgtbl::parse_model_tree(&b);
                 self.sel_model = self.models.iter().position(|m| m.0 == "MU128").unwrap_or(0);
                 self.load_model();
             }
@@ -103,6 +179,44 @@ impl XgEditor {
     /// The selected model's parameter table.
     pub fn table(&self) -> Option<&XgTable> {
         self.table.as_ref()
+    }
+
+    /// The XG models of xgeditor.ini: (name, parameter table, voice list).
+    pub fn models(&self) -> &[(String, String, String)] {
+        &self.models
+    }
+
+    /// The models by group (MU Series first, as the original's model tree).
+    pub fn model_tree(&self) -> &[(String, Vec<String>)] {
+        &self.tree
+    }
+
+    pub fn model_index(&self) -> usize {
+        self.sel_model
+    }
+
+    /// Switch the model (its table and voices load at once).
+    pub fn select_model(&mut self, i: usize) {
+        if i < self.models.len() && i != self.sel_model {
+            self.sel_model = i;
+            self.load_model();
+        }
+    }
+
+    /// An effect's type when the song sets none: the model's default (HALL1,
+    /// CHORUS1, DELAY L,C,R …).
+    pub fn fx_default_type(&self, t: &XgTable, slot: FxSlot) -> Vec<u8> {
+        block_keys(slot)
+            .first()
+            .and_then(|k| t.block(k))
+            .and_then(|b| b.params.first())
+            .map(|p| p.bytes.iter().map(|b| *b.2.first().unwrap_or(&0)).collect::<Vec<u8>>())
+            .unwrap_or_else(|| vec![0, 0])
+    }
+
+    /// The value lists of ws.ini (effect parameter displays).
+    pub fn enums(&self) -> &Enums {
+        &self.enums
     }
 
     pub fn voices(&self) -> &[Voice] {
@@ -345,7 +459,9 @@ fn block_keys(slot: FxSlot) -> Vec<&'static str> {
         FxSlot::Chorus => vec!["Cho_1"],
         FxSlot::Variation => vec!["Var_1"],
         FxSlot::Insertion(0) => vec!["Ins1_1"],
-        FxSlot::Insertion(_) => vec!["Ins2_1"],
+        FxSlot::Insertion(1) => vec!["Ins2_1"],
+        FxSlot::Insertion(2) => vec!["Ins3_1"],
+        FxSlot::Insertion(_) => vec!["Ins4_1"],
     }
 }
 

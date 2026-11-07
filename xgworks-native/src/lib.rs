@@ -10,6 +10,7 @@ mod icons;
 mod jobwin;
 mod listwin;
 mod lyricwin;
+mod chordwin;
 mod markerwin;
 mod midiio;
 mod mixwin;

@@ -20,8 +20,14 @@ use std::collections::{HashMap, VecDeque};
 
 pub mod mixer;
 pub mod xgtbl;
+pub mod soundset;
+pub mod drums;
+pub mod fxsysex;
+pub mod textenc;
+pub mod vh;
 pub mod importer;
 pub mod jobs;
+pub mod demix;
 pub mod xfinfo;
 pub mod gtrtab;
 pub mod listev;
@@ -113,13 +119,13 @@ fn read_cstring(buf: &[u8], i: &mut usize) -> String {
         n0 as usize
     };
     let end = (*i + len).min(buf.len());
-    let s = String::from_utf8_lossy(&buf[*i..end]).into_owned();
+    let s = textenc::decode(&buf[*i..end]);
     *i += len;
     s
 }
 
 fn mfc_cstring(s: &str) -> Vec<u8> {
-    let b = s.as_bytes();
+    let b = &textenc::encode(s)[..];
     if b.len() < 0xFF {
         let mut v = vec![b.len() as u8];
         v.extend_from_slice(b);
@@ -446,7 +452,7 @@ pub fn export_named(data: &[u8]) -> Vec<u8> {
             }
             let has_name = merged.iter().any(|e| matches!(e, Event::Meta { mtype: 0x03, .. }));
             if !name.is_empty() && !has_name {
-                merged.insert(0, Event::Meta { t: 0, mtype: 0x03, data: name.into_bytes() });
+                merged.insert(0, Event::Meta { t: 0, mtype: 0x03, data: textenc::encode(&name) });
             }
             tracks.push(block_to_mtrk(&merged));
         }
@@ -504,7 +510,7 @@ pub fn parse_smf_track(buf: &[u8]) -> (Vec<Event>, String, u8) {
                 break;
             }
             if meta == 0x03 {
-                name = String::from_utf8_lossy(&data).into_owned();
+                name = textenc::decode(&data);
             }
             events.push(Event::Meta { t, mtype: meta, data });
         } else if status == 0xF0 || status == 0xF7 {
@@ -818,7 +824,7 @@ pub fn track_plan(data: &[u8]) -> Vec<TrackPlan> {
                 }
                 Event::Meta { mtype: 0x03, data, .. } => {
                     if nm.is_empty() {
-                        nm = String::from_utf8_lossy(data).into_owned();
+                        nm = textenc::decode(data);
                     }
                 }
                 _ => {}
@@ -1049,7 +1055,9 @@ pub fn edit_model(data: &[u8]) -> (Vec<EditTrack>, u16) {
         let mut others = Vec::new();
         for e in evs {
             match e {
-                Event::Note { t, note, vel, gate, .. } => {
+                // notes of other channels (format 0) stay events on their own
+                // channel, so they play there and Demix can split them off
+                Event::Note { t, note, vel, gate, ch: nc } if nc & 0x0F == ch & 0x0F => {
                     notes.push(EditNote { tick: t, dur: gate, pitch: note, vel });
                 }
                 other => others.push(other),
@@ -1190,7 +1198,7 @@ pub fn write_mid(tracks: &[EditTrack], ppqn: u16) -> Vec<u8> {
         let has_name = evs.iter().any(|e| matches!(e, Event::Meta { mtype: 0x03, .. }));
         if !has_name {
             let nm = if t.name.is_empty() { format!("Track{}", k) } else { t.name.clone() };
-            evs.push(Event::Meta { t: 0, mtype: 0x03, data: nm.into_bytes() });
+            evs.push(Event::Meta { t: 0, mtype: 0x03, data: textenc::encode(&nm) });
         }
         mtrks.push(block_to_mtrk(&evs));
     }
@@ -1238,9 +1246,14 @@ pub fn edit_playback_plan(tracks: &[EditTrack], ppqn: u16) -> Vec<(f64, usize, V
         tempos.push((0, 500_000));
     }
     tempos.sort_by_key(|x| x.0);
-    // within a tick: everything else (note-offs, CC, program) before note-ons,
+    // within a tick: System On first (it resets what other tracks set at that
+    // tick), then everything else (note-offs, CC, program) before note-ons,
     // so a note re-struck where the previous one ends is not cut off
-    msgs.sort_by_key(|x| (x.0, (x.2.len() == 3 && x.2[0] & 0xF0 == 0x90 && x.2[2] > 0) as u8));
+    msgs.sort_by_key(|x| {
+        let reset = x.2.first() == Some(&0xF0) && crate::xgtbl::is_reset(&x.2[1..]);
+        let note_on = x.2.len() == 3 && x.2[0] & 0xF0 == 0x90 && x.2[2] > 0;
+        (x.0, if reset { 0u8 } else if note_on { 2 } else { 1 })
+    });
 
     let mut out = Vec::with_capacity(msgs.len());
     let (mut ti, mut last_tick, mut ms) = (0usize, 0u32, 0f64);

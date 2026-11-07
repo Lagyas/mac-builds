@@ -32,7 +32,7 @@ impl MarkerState {
             .enumerate()
             .flat_map(|(ti, t)| {
                 t.others.iter().enumerate().filter_map(move |(i, e)| match e {
-                    Event::Meta { t, mtype: MARKER, data } => Some((*t, ti, i, String::from_utf8_lossy(data).into_owned())),
+                    Event::Meta { t, mtype: MARKER, data } => Some((*t, ti, i, xgworks_core::textenc::decode(data))),
                     _ => None,
                 })
             })
@@ -69,7 +69,7 @@ impl MarkerState {
                 let t = tm.from_mbc(self.pos[0], self.pos[1], self.pos[2]);
                 let name = self.name.trim().to_string();
                 out.push(MarkerAction::Edit(Box::new(move |tr| {
-                    tr[master].others.push(Event::Meta { t, mtype: MARKER, data: name.into_bytes() });
+                    tr[master].others.push(Event::Meta { t, mtype: MARKER, data: xgworks_core::textenc::encode(&name) });
                 })));
                 self.name.clear();
             }
@@ -83,7 +83,7 @@ impl MarkerState {
                 let name = self.name.trim().to_string();
                 out.push(MarkerAction::Edit(Box::new(move |tr| {
                     if let Some(Event::Meta { data, .. }) = tr[ti].others.get_mut(i) {
-                        *data = name.into_bytes();
+                        *data = xgworks_core::textenc::encode(&name);
                     }
                 })));
             }

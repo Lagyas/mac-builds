@@ -29,7 +29,7 @@
   <p id="ver" style="font-size:12px;white-space:pre-line"></p>
   <p id="msg">Loading…</p>
   <div id="need" hidden>
-    <p>The editor uses the data of an installed <b>XGworks V4.0</b> (toolbar art, mixer panel, voice lists,
+    <p>The editor uses the data of an installed <b>XGworks V4.0</b> (toolbar art, mixer and XG Editor panels, voice lists,
       XG parameter tables). They are read in your browser only and kept in its storage for next time.</p>
     <label class="btn" for="pick">Choose the XGworks folder…</label>
     <input id="pick" type="file" webkitdirectory multiple>
@@ -40,12 +40,15 @@
 import init, { add_file, start, version } from './pkg/xgworks_web.js';
 
 const q = new URLSearchParams(location.search);
-// XGworks folder on the server; served from F:\rea the default finds F:\rea\XG4
-const XG4 = (q.get('xg4') || '../../XG4/').replace(/\/?$/, '/');
+// XGworks folder on the server: ?xg4=<url>, else "xg4/" next to the page (the
+// web site, password-protected), else F:\rea\XG4 when served from F:\rea
+const XG4_DIRS = (q.get('xg4') ? [q.get('xg4')] : ['xg4/', '../../XG4/']).map(d => d.replace(/\/?$/, '/'));
+let XG4 = XG4_DIRS[0];
 const msg = t => document.getElementById('msg').textContent = t;
 
 // ---- the files the app reads from the XGworks folder ----
-const ROOT = ['XGworks.exe', 'ws.ini', 'DrvShortName.ini', 'Trk.ini'];
+// midi-file-editor.html (optional, the user's own): PSR-SX900 / SC-8850 voices for the XGM Editor
+const ROOT = ['XGworks.exe', 'XGEditor.dll', 'ws.ini', 'DrvShortName.ini', 'Trk.ini', 'midi-file-editor.html'];
 const text = b => new TextDecoder('latin1').decode(b);
 function section(ini, name) {
   const out = [];
@@ -100,10 +103,12 @@ async function cacheSave(files) {
   } catch (e) { console.warn('cache', e); }
 }
 
-function pickFolder() {
+/// Ask for the XGworks folder; `keep` (older saved data) is what the second button keeps.
+function pickFolder(keep) {
   document.getElementById('need').hidden = false;
+  if (keep) document.getElementById('skip').textContent = 'Keep the saved data';
   return new Promise(ok => {
-    document.getElementById('skip').onclick = () => ok(new Map());
+    document.getElementById('skip').onclick = () => ok(keep || new Map());
     document.getElementById('pick').onchange = async ev => {
       // map "XG4/sub/file" -> File, case-insensitive, without the top folder
       const all = new Map();
@@ -134,8 +139,20 @@ async function main() {
   }
 
   msg('Loading the XGworks data…');
-  let files = await collect(p => fetchBytes(XG4 + p));
-  if (!files) files = await cacheLoad();
+  let files = null;
+  for (const d of XG4_DIRS) {
+    files = await collect(p => fetchBytes(d + p));
+    if (files) { XG4 = d; break; }
+  }
+  if (!files) {
+    files = await cacheLoad();
+    // saved by a version that did not read XGEditor.dll yet (before 0.11.0):
+    // without it the XG Editor cannot show the original panel
+    if (files && !files.has('XGEditor.dll')) {
+      msg('The saved XGworks data has no XGEditor.dll (saved by an older version), so the XG Editor cannot look like the original.\nChoose the XGworks folder once more.');
+      files = await pickFolder(files);
+    }
+  }
   if (!files) { msg('XGworks data not found next to the page.'); files = await pickFolder(); }
   for (const [p, b] of files) add_file(p.startsWith('../') ? p.slice(3) : 'XG4/' + p, b);
   // MS Gothic for the List window, if put next to the page or into the XGworks folder

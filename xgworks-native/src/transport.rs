@@ -219,6 +219,31 @@ impl App {
                 ui.label("Numpad 2 jumps back");
                 ui.add(egui::Slider::new(&mut self.rewind_bars, 2..=4).suffix(" bars"));
                 ui.end_row();
+                ui.label("Double-click on a track opens");
+                ui.horizontal(|ui| {
+                    for (k, name) in ["Piano Roll", "Event List", "Staff", "Drum"].into_iter().enumerate() {
+                        ui.radio_value(&mut self.dbl_editor, k as u8, name);
+                    }
+                });
+                ui.end_row();
+                ui.label("Text and controls size");
+                ui.horizontal(|ui| {
+                    if ui.button(" A− ").on_hover_text("Smaller").clicked() {
+                        self.ui_scale = ((self.ui_scale - 0.1) * 10.0).round() / 10.0;
+                    }
+                    if ui.button(" A+ ").on_hover_text("Larger").clicked() {
+                        self.ui_scale = ((self.ui_scale + 0.1) * 10.0).round() / 10.0;
+                    }
+                    self.ui_scale = self.ui_scale.clamp(0.7, 2.0);
+                    ui.label(format!("{:.0} %", self.ui_scale * 100.0));
+                    if ui.button("100 %").clicked() {
+                        self.ui_scale = 1.0;
+                    }
+                });
+                ui.end_row();
+                ui.label("XGM Editor sound set");
+                self.xgm_inst_combo(ui, "prefs_xgm_inst");
+                ui.end_row();
                 ui.label("XGworks data folder");
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(crate::platform::xg4_dir().display().to_string()).monospace());

@@ -41,6 +41,22 @@ pub fn font_files() -> Vec<(String, String)> {
         if let Some(h) = std::env::var_os("HOME") {
             dirs.push(PathBuf::from(h).join("Library/Fonts"));
         }
+    } else if !cfg!(windows) {
+        // Linux: the font folders and two levels of sub-folders (e.g. truetype/dejavu)
+        let mut roots = vec![PathBuf::from("/usr/share/fonts"), PathBuf::from("/usr/local/share/fonts")];
+        if let Some(h) = std::env::var_os("HOME") {
+            roots.push(PathBuf::from(&h).join(".local/share/fonts"));
+            roots.push(PathBuf::from(h).join(".fonts"));
+        }
+        let subdirs = |d: &Path| -> Vec<PathBuf> { std::fs::read_dir(d).map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()).unwrap_or_default() };
+        dirs = Vec::new();
+        for r in roots {
+            let subs = subdirs(&r);
+            let subs2: Vec<PathBuf> = subs.iter().flat_map(|s| subdirs(s)).collect();
+            dirs.push(r);
+            dirs.extend(subs);
+            dirs.extend(subs2);
+        }
     }
     if let Some(f) = app_sub("Fonts") {
         dirs.insert(0, f);
@@ -337,12 +353,59 @@ pub fn open_song(slot: &Picked, _ctx: &eframe::egui::Context) {
 pub fn open_song(slot: &Picked, ctx: &eframe::egui::Context) {
     let (slot, ctx) = (slot.clone(), ctx.clone());
     wasm_bindgen_futures::spawn_local(async move {
-        if let Some(f) = rfd::AsyncFileDialog::new().add_filter("XGworks / MIDI", &["xws", "XWS", "mid", "MID"]).pick_file().await {
-            let bytes = f.read().await;
-            *slot.borrow_mut() = Some((f.file_name(), bytes));
+        if let Some((name, bytes)) = web_pick::pick(&["xws", "mid"], false).await.into_iter().next() {
+            *slot.borrow_mut() = Some((name, bytes));
             ctx.request_repaint();
         }
     });
+}
+
+/// The browser's own file chooser, opened straight away (rfd's web dialog
+/// first shows an extra page overlay with its own button).
+#[cfg(target_arch = "wasm32")]
+mod web_pick {
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen::JsCast;
+
+    #[wasm_bindgen(inline_js = r#"
+        export function xgw_pick_files(accept, multiple) {
+            return new Promise(resolve => {
+                const inp = document.createElement('input');
+                inp.type = 'file';
+                inp.accept = accept;
+                inp.multiple = multiple;
+                inp.style.display = 'none';
+                document.body.appendChild(inp);
+                let done = false;
+                const end = out => { if (done) return; done = true; inp.remove(); resolve(out); };
+                inp.addEventListener('change', async () => {
+                    const out = [];
+                    for (const f of inp.files || []) out.push([f.name, new Uint8Array(await f.arrayBuffer())]);
+                    end(out);
+                });
+                inp.addEventListener('cancel', () => end([]));
+                inp.click();
+            });
+        }
+    "#)]
+    extern "C" {
+        fn xgw_pick_files(accept: &str, multiple: bool) -> js_sys::Promise;
+    }
+
+    /// Picked files as (name, bytes); empty when cancelled.
+    pub async fn pick(exts: &[&str], multiple: bool) -> Vec<(String, Vec<u8>)> {
+        let mut acc: Vec<String> = exts.iter().map(|e| format!(".{}", e.to_ascii_lowercase())).collect();
+        acc.dedup();
+        let Ok(v) = wasm_bindgen_futures::JsFuture::from(xgw_pick_files(&acc.join(","), multiple)).await else { return Vec::new() };
+        js_sys::Array::from(&v)
+            .iter()
+            .filter_map(|pair| {
+                let pair = pair.dyn_into::<js_sys::Array>().ok()?;
+                let bytes = pair.get(1).dyn_into::<js_sys::Uint8Array>().ok()?.to_vec();
+                Some((pair.get(0).as_string()?, bytes))
+            })
+            .collect()
+    }
 }
 
 /// A file picked in a multi-file dialog: natively its path (read when used),
@@ -392,13 +455,12 @@ pub fn pick_files(slot: &PickedFiles, ctx: &eframe::egui::Context, filter: &str,
     let (slot, ctx) = (slot.clone(), ctx.clone());
     let exts: Vec<String> = exts.iter().map(|s| s.to_string()).collect();
     let filter = filter.to_string();
+    let _ = filter;
     wasm_bindgen_futures::spawn_local(async move {
-        if let Some(files) = rfd::AsyncFileDialog::new().add_filter(&filter, &exts).pick_files().await {
-            let mut v = Vec::new();
-            for f in files {
-                let b = f.read().await;
-                v.push(PickedFile { name: f.file_name(), path: None, bytes: Some(std::rc::Rc::new(b)) });
-            }
+        let exts: Vec<&str> = exts.iter().map(String::as_str).collect();
+        let files = web_pick::pick(&exts, true).await;
+        if !files.is_empty() {
+            let v = files.into_iter().map(|(name, b)| PickedFile { name, path: None, bytes: Some(std::rc::Rc::new(b)) }).collect();
             *slot.borrow_mut() = Some(v);
             ctx.request_repaint();
         }

@@ -50,6 +50,8 @@ cat > "$DIST/XG4/README.txt" <<'TXT'
 Copy the files of your XGworks V4.0 installation here (ws.ini, inst.ini, XGmusic.ttf,
 Drum Kit.ini, Melody.ini and the other *.ini files, XGworks.exe and the
 XGEditor folder). XGWorks NextGen finds them here automatically.
+Optional: midi-file-editor.html (your own) adds the PSR-SX900 / SC-8850 voices
+and the Vocal Harmony type names.
 TXT
 cat > "$DIST/Fonts/README.txt" <<'TXT'
 Optional: put msgothic.ttc here for the List window font like the original.

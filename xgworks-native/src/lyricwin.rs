@@ -102,6 +102,102 @@ pub fn lyrics(t: &EditTrack) -> Vec<(u32, usize, Vec<u8>)> {
 
 /// Typed text → syllables with karaoke marks: words split at spaces,
 /// syllables at "-", a new line starts with "/", an empty line = new page "<".
+/// The text without diacritics (č → c, ů → u, ß → ss …) for displays and
+/// keyboards that show only plain letters.
+pub fn strip_diacritics(s: &str) -> String {
+    const FROM: &str = "áàâäãåāăąčćçĉďđéèêëěēėęíìîïīįľĺłňńñóòôöõőøōřŕšśşșťţțúùûüůűūųýÿžźż\
+ÁÀÂÄÃÅĀĂĄČĆÇĈĎĐÉÈÊËĚĒĖĘÍÌÎÏĪĮĽĹŁŇŃÑÓÒÔÖÕŐØŌŘŔŠŚŞȘŤŢȚÚÙÛÜŮŰŪŲÝŸŽŹŻ";
+    const TO: &str = "aaaaaaaaaccccddeeeeeeeeiiiiiilllnnnoooooooorrsssstttuuuuuuuuyyzzz\
+AAAAAAAAACCCCDDEEEEEEEEIIIIIILLLNNNOOOOOOOORRSSSSTTTUUUUUUUUYYZZZ";
+    let map: Vec<(char, char)> = FROM.chars().zip(TO.chars()).collect();
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            'ß' => out.push_str("ss"),
+            'Æ' => out.push_str("AE"),
+            'æ' => out.push_str("ae"),
+            'Œ' => out.push_str("OE"),
+            'œ' => out.push_str("oe"),
+            _ => out.push(map.iter().find(|m| m.0 == c).map_or(c, |m| m.1)),
+        }
+    }
+    out
+}
+
+/// Re-encode every lyric and text event from `from` (as read now) to `to`;
+/// a letter `to` cannot hold loses its diacritics (ů → u), never "?".
+/// Returns how many events changed.
+pub fn convert_song_lyrics(tracks: &mut [EditTrack], from: Enc, to: Enc) -> usize {
+    let mut n = 0;
+    for t in tracks.iter_mut() {
+        for e in t.others.iter_mut() {
+            if let Event::Meta { mtype: LYRIC | 0x01, data, .. } = e {
+                let s = from.decode(data);
+                let mut out = Vec::new();
+                for ch in s.chars() {
+                    let one = ch.to_string();
+                    let b = to.encode(&one);
+                    if b == b"?" && ch != '?' {
+                        out.extend(to.encode(&strip_diacritics(&one)));
+                    } else {
+                        out.extend(b);
+                    }
+                }
+                if out != *data {
+                    *data = out;
+                    n += 1;
+                }
+            }
+        }
+    }
+    n
+}
+
+/// True when bytes with letters above ASCII are all valid UTF-8 (lyrics
+/// written as UTF-8; Windows-1250 text is almost never valid UTF-8).
+pub fn looks_utf8<'a>(texts: impl IntoIterator<Item = &'a [u8]>) -> bool {
+    let mut high = false;
+    for b in texts {
+        if b.iter().any(|&c| c >= 0x80) {
+            if std::str::from_utf8(b).is_err() {
+                return false;
+            }
+            high = true;
+        }
+    }
+    high
+}
+
+/// A text file's encoding: UTF-8 (with or without BOM) when it is valid
+/// UTF-8 with letters above ASCII, else Windows-1250.
+pub fn decode_file(bytes: &[u8]) -> String {
+    let b = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    if b.len() != bytes.len() || looks_utf8([b]) {
+        String::from_utf8_lossy(b).into_owned()
+    } else {
+        Enc::Cp1250.decode(b)
+    }
+}
+
+/// Remove the diacritics of every lyric (and text event, as .KAR files keep
+/// their lyrics there) in the song; returns how many events changed.
+pub fn strip_song_diacritics(tracks: &mut [EditTrack], enc: Enc) -> usize {
+    let mut n = 0;
+    for t in tracks.iter_mut() {
+        for e in t.others.iter_mut() {
+            if let Event::Meta { mtype: LYRIC | 0x01, data, .. } = e {
+                let s = enc.decode(data);
+                let plain = strip_diacritics(&s);
+                if plain != s {
+                    *data = enc.encode(&plain);
+                    n += 1;
+                }
+            }
+        }
+    }
+    n
+}
+
 pub fn syllables(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut mark = "";
@@ -199,6 +295,38 @@ fn page_at(items: &[(u32, String)], tick: u32) -> Vec<Vec<(String, bool)>> {
     page.into_iter().filter(|l| !l.is_empty()).map(|l| l.into_iter().map(|(t, s)| (s, t <= tick)).collect()).collect()
 }
 
+/// A slider over the whole song (bar:beat shown); returns the new position
+/// when it is moved. The Lyrics and Chords previews follow the song position.
+pub fn time_line(ui: &mut egui::Ui, tracks: &[EditTrack], tm: &TimeMap, song_pos: u32, id: &str) -> Option<u32> {
+    let end = tracks
+        .iter()
+        .flat_map(|t| t.notes.iter().map(|n| n.tick + n.dur).chain(t.others.iter().map(|e| e.t())))
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let mut v = song_pos.min(end) as f64;
+    let mut moved = None;
+    ui.horizontal(|ui| {
+        ui.label("Position");
+        ui.spacing_mut().slider_width = (ui.available_width() - 90.0).max(120.0);
+        let r = ui.add(
+            egui::Slider::new(&mut v, 0.0..=end as f64)
+                .show_value(false)
+                .step_by(1.0),
+        );
+        let (m, b, _) = tm.to_mbc(v as u32);
+        ui.monospace(format!("{m:04}:{b}"));
+        if r.changed() {
+            moved = Some(v as u32);
+        }
+        let _ = id;
+    });
+    moved
+}
+
+/// Export / Import: what they handle.
+pub const TXT_MODES: [&str; 3] = ["Lyrics + chords", "Lyrics", "Chords"];
+
 pub enum LyricAction {
     /// The song was changed (after a snapshot for undo).
     Edit(Box<dyn FnOnce(&mut [EditTrack])>),
@@ -215,11 +343,151 @@ pub struct LyricsState {
     from_bar: u32,
     replace: bool,
     typed: String,
+    /// Text size in this window (list, karaoke preview), 0.7 … 2.5.
+    font: f32,
+    /// What Export / Import handle: 0 lyrics + chords, 1 lyrics, 2 chords.
+    txt_mode: u8,
+    /// The export file's encoding (Import finds UTF-8 by itself).
+    file_enc: Enc,
+    /// The file picked for Import (it arrives later on the web).
+    pick: crate::platform::PickedFiles,
+    /// An import waiting for "replace or add": (lyrics, chords, lines not understood).
+    pending: Option<(Vec<(u32, String)>, Vec<(u32, Vec<u8>)>, usize)>,
+    /// PSRUTI-style Fill Lyrics and how they go in.
+    fill: FillSet,
+    fill_method: u8,
+}
+
+/// PSRUTI's "Fill Lyrics": short strings on the beats that show the player
+/// where the beats are. Defaults as PSRUTI's: measure ".-- ", beat "--- ",
+/// end "---", a linefeed 30 ticks after the last beat.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FillSet {
+    pub measure: String,
+    pub beat: String,
+    pub end: String,
+    pub linefeed: Option<u32>,
+}
+
+impl Default for FillSet {
+    fn default() -> Self {
+        FillSet { measure: ".-- ".into(), beat: "--- ".into(), end: "---".into(), linefeed: Some(30) }
+    }
+}
+
+/// Where Fill Lyrics go (PSRUTI's three methods).
+pub const FILL_METHODS: [&str; 3] = ["Not at lyrics", "Not in beats with lyrics", "Not in measures with lyrics"];
+
+/// Insert Fill Lyrics on the beats of `track` up to `song_end`: on beat 1 the
+/// measure string, on the last beat the end string, else the beat string
+/// (beat and end both empty = beat 1 only), a linefeed after the measure.
+/// A song without lyrics gets them from measure 2. Returns how many went in.
+pub fn insert_fill(track: &mut EditTrack, tm: &TimeMap, song_end: u32, set: &FillSet, method: u8, enc: Enc) -> usize {
+    let had: Vec<u32> = lyrics(track).into_iter().map(|(t, _, _)| t).collect();
+    let any_in = |a: u32, b: u32| had.iter().any(|&t| t >= a && t < b);
+    let mut m = if had.is_empty() { 2 } else { 1 };
+    let mut n = 0;
+    let only_one = set.beat.is_empty() && set.end.is_empty();
+    loop {
+        let ms = tm.from_mbc(m, 1, 0);
+        if ms >= song_end {
+            break;
+        }
+        let (bar, beat) = (tm.bar_len(ms).max(1), tm.beat_len(ms).max(1));
+        let beats = (bar / beat).max(1);
+        let me = ms + bar;
+        let mut last = None;
+        if !(method == 2 && any_in(ms, me)) {
+            for k in 0..beats {
+                let t = ms + k * beat;
+                let skip = match method {
+                    0 => had.contains(&t),
+                    _ => any_in(t, t + beat),
+                };
+                if skip || (only_one && k > 0) {
+                    continue;
+                }
+                let text = if k == 0 {
+                    &set.measure
+                } else if k + 1 == beats {
+                    &set.end
+                } else {
+                    &set.beat
+                };
+                if text.is_empty() {
+                    continue;
+                }
+                track.others.push(Event::Meta { t, mtype: LYRIC, data: enc.encode(text) });
+                last = Some(ms + (beats - 1) * beat);
+                n += 1;
+            }
+        }
+        if let (Some(lb), Some(d)) = (last, set.linefeed) {
+            if lb + d < me {
+                track.others.push(Event::Meta { t: lb + d, mtype: LYRIC, data: b"\r".to_vec() });
+            }
+        }
+        m += 1;
+    }
+    n
+}
+
+/// Delete Fill Lyrics: lyrics that are exactly one of the set's strings,
+/// and a linefeed right after one of them. Returns how many went.
+pub fn delete_fill(track: &mut EditTrack, set: &FillSet, enc: Enc) -> usize {
+    let fills: Vec<&str> = [set.measure.as_str(), set.beat.as_str(), set.end.as_str()].into_iter().filter(|s| !s.is_empty()).collect();
+    let mut lyr: Vec<(u32, usize)> = track
+        .others
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| if let Event::Meta { t, mtype: LYRIC, .. } = e { Some((*t, i)) } else { None })
+        .collect();
+    lyr.sort();
+    let mut gone = std::collections::HashSet::new();
+    let mut prev_fill = false;
+    for (_, i) in lyr {
+        let Event::Meta { data, .. } = &track.others[i] else { continue };
+        let s = enc.decode(data);
+        let is_fill = fills.contains(&s.as_str());
+        let is_lf = s == "\r";
+        if is_fill || (is_lf && prev_fill) {
+            gone.insert(i);
+        }
+        prev_fill = is_fill;
+    }
+    let mut k = 0;
+    track.others.retain(|_| {
+        let keep = !gone.contains(&k);
+        k += 1;
+        keep
+    });
+    gone.len()
 }
 
 impl LyricsState {
+    /// The code page the lyrics are read in.
+    pub fn enc(&self) -> Enc {
+        self.enc
+    }
+
     pub fn new(track: usize) -> Self {
-        LyricsState { track, enc: Enc::Cp1250, sel: None, edit_text: String::new(), melody: track, from_bar: 1, replace: true, typed: String::new() }
+        LyricsState {
+            track,
+            enc: Enc::Cp1250,
+            sel: None,
+            edit_text: String::new(),
+            melody: track,
+            from_bar: 1,
+            replace: true,
+            typed: String::new(),
+            font: 1.0,
+            txt_mode: 0,
+            file_enc: Enc::Cp1250,
+            pick: Default::default(),
+            pending: None,
+            fill: FillSet::default(),
+            fill_method: 2,
+        }
     }
 
     /// `visible` = track indices shown (display number = position + 1).
@@ -236,7 +504,7 @@ impl LyricsState {
             let has = tracks[i].others.iter().any(|e| matches!(e, Event::Meta { mtype: LYRIC, .. }));
             format!("{num} {}{}", tracks[i].name, if has { "  ♪" } else { "" })
         };
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Lyrics track");
             egui::ComboBox::from_id_source("lyr_trk").width(200.0).selected_text(label(self.track)).show_ui(ui, |ui| {
                 for &i in visible {
@@ -252,8 +520,37 @@ impl LyricsState {
                     ui.selectable_value(&mut self.enc, e, n);
                 }
             });
+            if ui
+                .add_enabled(self.enc != Enc::Cp1250, egui::Button::new("Convert to Windows-1250"))
+                .on_hover_text("Write every lyric / text event in Windows-1250 (as read in the chosen encoding); letters 1250 lacks lose their diacritics (undo-able)")
+                .clicked()
+            {
+                let from = self.enc;
+                self.enc = Enc::Cp1250;
+                out.push(LyricAction::Edit(Box::new(move |tr| {
+                    convert_song_lyrics(tr, from, Enc::Cp1250);
+                })));
+                out.push(LyricAction::Status("Lyrics converted to Windows-1250 (undo with Ctrl+Z).".into()));
+            }
+            ui.separator();
+            ui.label("Text size");
+            if ui.button(" A− ").clicked() {
+                self.font = (self.font - 0.1).max(0.7);
+            }
+            if ui.button(" A+ ").clicked() {
+                self.font = (self.font + 0.1).min(2.5);
+            }
+            ui.label(format!("{:.0} %", self.font * 100.0));
         });
         let items = lyrics(&tracks[self.track]);
+        if self.enc != Enc::Utf8 && looks_utf8(items.iter().map(|i| i.2.as_slice())) {
+            ui.horizontal(|ui| {
+                ui.colored_label(Color32::from_rgb(0xC0, 0x60, 0x00), "These lyrics look like UTF-8.");
+                if ui.button("Read as UTF-8").clicked() {
+                    self.enc = Enc::Utf8;
+                }
+            });
+        }
         let texts: Vec<(u32, String)> = items.iter().map(|(t, _, d)| (*t, self.enc.decode(d))).collect();
         let ti = self.track;
 
@@ -261,6 +558,13 @@ impl LyricsState {
             // ---- list
             let ui = &mut cols[0];
             ui.horizontal(|ui| {
+                if ui.button("Remove diacritics").on_hover_text("Every lyric and text event of the song without č ř ů … (undo-able)").clicked() {
+                    let enc = self.enc;
+                    out.push(LyricAction::Edit(Box::new(move |tr| {
+                        strip_song_diacritics(tr, enc);
+                    })));
+                    out.push(LyricAction::Status("Lyrics: diacritics removed.".into()));
+                }
                 if ui.button("Insert at song position").clicked() {
                     let (enc, txt) = (self.enc, if self.edit_text.is_empty() { "la ".to_string() } else { from_shown(&self.edit_text) });
                     out.push(LyricAction::Edit(Box::new(move |tr| tr[ti].others.push(Event::Meta { t: song_pos, mtype: LYRIC, data: enc.encode(&txt) }))));
@@ -299,66 +603,107 @@ impl LyricsState {
                     })));
                 }
             });
-            #[cfg(target_arch = "wasm32")]
-            let _ = (master, file_name);
-            #[cfg(not(target_arch = "wasm32"))]
+            // Midimusic Chord and Lyrics Protocol (.txt), as midi-file-editor
             ui.horizontal(|ui| {
-                {
-                    if ui.button("Export .lyrics…").on_hover_text("Lyrics (this track) and XF chords as text with bar:beat:tick (Midimusic Chord and Lyrics Protocol, Windows-1250)").clicked() {
-                        let text = export_text(tracks, ti, tm, self.enc, file_name);
-                        let stem = std::path::Path::new(file_name).file_stem().and_then(|x| x.to_str()).unwrap_or("song").to_string();
-                        let mut dlg = rfd::FileDialog::new().set_file_name(format!("{stem}.lyrics")).add_filter("Lyrics", &["lyrics", "txt"]);
-                        if let Some(d) = crate::platform::app_sub("Songs") {
-                            dlg = dlg.set_directory(d);
-                        }
-                        if let Some(path) = dlg.save_file() {
-                            out.push(LyricAction::Status(match std::fs::write(&path, Enc::Cp1250.encode(&text)) {
-                                Ok(_) => format!("Exported to {}.", path.display()),
-                                Err(e) => format!("Export failed: {e}"),
-                            }));
-                        }
+                egui::ComboBox::from_id_source("lyr_txt_mode").selected_text(TXT_MODES[self.txt_mode as usize]).width(130.0).show_ui(ui, |ui| {
+                    for (k, m) in TXT_MODES.iter().enumerate() {
+                        ui.selectable_value(&mut self.txt_mode, k as u8, *m);
                     }
-                    if ui.button("Import .lyrics…").on_hover_text("Replace this track's lyrics (and the XF chords, when the file has Chd lines) from an edited .lyrics / .txt file").clicked() {
-                        let mut dlg = rfd::FileDialog::new().add_filter("Lyrics", &["lyrics", "txt"]);
-                        if let Some(d) = crate::platform::app_sub("Songs") {
-                            dlg = dlg.set_directory(d);
-                        }
-                        if let Some(path) = dlg.pick_file() {
-                            match std::fs::read(&path) {
-                                Ok(bytes) => {
-                                    let (lyr, chd, bad) = parse_text(&Enc::Cp1250.decode(&bytes), tm);
-                                    if lyr.is_empty() && chd.is_empty() {
-                                        out.push(LyricAction::Status("No Lyr / Chd lines in that file.".into()));
-                                    } else {
-                                        let (nl, nc, enc) = (lyr.len(), chd.len(), self.enc);
-                                        out.push(LyricAction::Edit(Box::new(move |tr| apply_import(tr, ti, master, &lyr, &chd, enc))));
-                                        out.push(LyricAction::Status(format!(
-                                            "Imported {nl} lyrics{}{} (undo with Ctrl+Z).",
-                                            if nc > 0 { format!(" and {nc} chords") } else { String::new() },
-                                            if bad > 0 { format!("; {bad} lines not understood") } else { String::new() }
-                                        )));
-                                    }
-                                }
-                                Err(e) => out.push(LyricAction::Status(format!("Import failed: {e}"))),
-                            }
-                        }
+                });
+                egui::ComboBox::from_id_source("lyr_file_enc")
+                    .selected_text(if self.file_enc == Enc::Utf8 { "UTF-8" } else { "Win-1250" })
+                    .width(80.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.file_enc, Enc::Cp1250, "Win-1250");
+                        ui.selectable_value(&mut self.file_enc, Enc::Utf8, "UTF-8");
+                    })
+                    .response
+                    .on_hover_text("The export file's encoding (Import recognises UTF-8 by itself)");
+                if ui.button("Export…").on_hover_text("Midimusic Chord and Lyrics Protocol text (Lyr / Chd lines with bar:beat:tick)").clicked() {
+                    let text = export_text(tracks, ti, tm, self.enc, file_name, self.txt_mode);
+                    let stem = std::path::Path::new(file_name).file_stem().and_then(|x| x.to_str()).unwrap_or("song").to_string();
+                    let suffix = ["_lyrics+chords", "_lyrics", "_chords"][self.txt_mode as usize];
+                    if let Some(m) = crate::platform::save_song(&format!("{stem}{suffix}.txt"), "txt", "Midimusic lyrics (*.txt)", &self.file_enc.encode(&text)) {
+                        out.push(LyricAction::Status(m));
                     }
                 }
+                if ui.button("Import…").on_hover_text("Lyrics / chords from a Midimusic lyrics text (.txt, .lyrics); then replace the old ones or add").clicked() {
+                    crate::platform::pick_files(&self.pick, ui.ctx(), "Midimusic lyrics (*.txt, *.lyrics)", &["txt", "lyrics"]);
+                }
+                if ui.add_enabled(!items.is_empty(), egui::Button::new("Clear all lyrics")).on_hover_text("Delete every lyric of this track (undo-able)").clicked() {
+                    let n = items.len();
+                    out.push(LyricAction::Edit(Box::new(move |tr| tr[ti].others.retain(|e| !matches!(e, Event::Meta { mtype: LYRIC, .. })))));
+                    out.push(LyricAction::Status(format!("{n} lyrics deleted (undo with Ctrl+Z).")));
+                }
             });
-            ui.label(egui::RichText::new(format!("{} lyric events · click = select · double-click = song position · · = space", items.len())).small());
-            egui::ScrollArea::vertical().id_source("lyr_list").max_height(ui.available_height() - 4.0).show(ui, |ui| {
+            // a picked file: read it, then ask "replace or add" when the song has some already
+            if let Some(f) = self.pick.borrow_mut().take().and_then(|v| v.into_iter().next()) {
+                match f.read() {
+                    Some(bytes) => {
+                        let (mut lyr, mut chd, bad) = parse_text(&decode_file(&bytes), tm);
+                        if self.txt_mode == 2 {
+                            lyr.clear();
+                        }
+                        if self.txt_mode == 1 {
+                            chd.clear();
+                        }
+                        if lyr.is_empty() && chd.is_empty() {
+                            out.push(LyricAction::Status("No Lyr / Chd lines in that file.".into()));
+                        } else {
+                            self.pending = Some((lyr, chd, bad));
+                        }
+                    }
+                    None => out.push(LyricAction::Status("Import: the file cannot be read.".into())),
+                }
+            }
+            let has_chords = tracks.iter().any(|t| t.others.iter().any(|e| matches!(e, Event::Meta { mtype: 0x7F, data, .. } if xf_chord_name(data).is_some())));
+            if let Some((lyr, chd, bad)) = self.pending.clone() {
+                let clash = (!lyr.is_empty() && !items.is_empty()) || (!chd.is_empty() && has_chords);
+                let mut go = if clash { None } else { Some(true) };
+                if clash {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(Color32::from_rgb(0xC0, 0x60, 0x00), format!("Import {} lyrics / {} chords: the song has some already.", lyr.len(), chd.len()));
+                        if ui.button("Replace").clicked() {
+                            go = Some(true);
+                        }
+                        if ui.button("Add").clicked() {
+                            go = Some(false);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.pending = None;
+                        }
+                    });
+                }
+                if let Some(replace) = go {
+                    self.pending = None;
+                    let (nl, nc, enc) = (lyr.len(), chd.len(), self.enc);
+                    out.push(LyricAction::Edit(Box::new(move |tr| apply_import(tr, ti, master, &lyr, &chd, enc, replace))));
+                    out.push(LyricAction::Status(format!(
+                        "Imported {nl} lyrics and {nc} chords{}{} (undo with Ctrl+Z).",
+                        if replace { ", the old ones replaced" } else { ", added" },
+                        if bad > 0 { format!("; {bad} lines not understood") } else { String::new() }
+                    )));
+                }
+            }
+            ui.label(egui::RichText::new(format!("{} lyric events · click = select + song position · · = space", items.len())).small());
+            // a fixed height: filling the free height made the (resizable) window grow
+            egui::ScrollArea::vertical().id_source("lyr_list").max_height(340.0).auto_shrink([false, false]).show(ui, |ui| {
                 egui::Grid::new("lyr_grid").striped(true).num_columns(2).show(ui, |ui| {
                     for (k, (t, s)) in texts.iter().enumerate() {
                         let (m, b, c) = tm.to_mbc(*t);
                         let pos = format!("{m:04}:{b}:{c:03}");
-                        let r1 = ui.selectable_label(self.sel == Some(k), egui::RichText::new(pos).monospace());
-                        let r2 = ui.selectable_label(self.sel == Some(k), shown_job(s, ui.visuals().text_color()));
+                        let fs = 13.0 * self.font;
+                        let r1 = ui.selectable_label(self.sel == Some(k), egui::RichText::new(pos).monospace().size(fs));
+                        let mut job = shown_job(s, ui.visuals().text_color());
+                        for sec in &mut job.sections {
+                            sec.format.font_id.size = fs;
+                        }
+                        let r2 = ui.selectable_label(self.sel == Some(k), job);
                         let r = r1.union(r2);
                         if r.clicked() {
+                            // the song position (and the preview) follow the clicked lyric
                             self.sel = Some(k);
                             self.edit_text = to_shown(s);
-                        }
-                        if r.double_clicked() {
                             out.push(LyricAction::Locate(*t));
                         }
                         ui.end_row();
@@ -372,12 +717,14 @@ impl LyricsState {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 170.0), egui::Sense::hover());
             let p = ui.painter_at(rect);
             p.rect_filled(rect, 4.0, Color32::from_rgb(16, 20, 40));
-            let page = page_at(&texts, if playing || song_pos > 0 { song_pos } else { 0 });
+            // the page at the song position (playing or not)
+            let _ = playing;
+            let page = page_at(&texts, song_pos);
             if page.is_empty() {
                 p.text(rect.center(), egui::Align2::CENTER_CENTER, "No lyrics on this track.", egui::FontId::proportional(14.0), Color32::from_gray(150));
             }
             // lines centred; a line wider than the box wraps between syllables
-            let font = egui::FontId::proportional(20.0);
+            let font = egui::FontId::proportional(20.0 * self.font);
             let max_w = rect.width() - 24.0;
             let mut rows: Vec<Vec<(std::sync::Arc<egui::Galley>, bool)>> = Vec::new();
             for line in &page {
@@ -395,7 +742,7 @@ impl LyricsState {
                 }
                 rows.push(row);
             }
-            let line_h = 27.0;
+            let line_h = 27.0 * self.font;
             let shown = rows.len().min(6);
             let mut y = rect.center().y - shown as f32 * line_h / 2.0;
             for row in rows.iter().take(shown) {
@@ -407,6 +754,10 @@ impl LyricsState {
                     x += g.size().x;
                 }
                 y += line_h;
+            }
+            // a time line to move through the song: the preview shows that page
+            if let Some(t) = time_line(ui, tracks, tm, song_pos, "lyr_scrub") {
+                out.push(LyricAction::Locate(t));
             }
             ui.add_space(6.0);
             ui.separator();
@@ -448,6 +799,49 @@ impl LyricsState {
                 }
                 if ui.button("Load current lyrics").clicked() {
                     self.typed = to_typed(&texts);
+                }
+            });
+            ui.add_space(6.0);
+            ui.separator();
+            ui.label(egui::RichText::new("Fill Lyrics (beat marks, as PSRUTI)").strong());
+            ui.horizontal(|ui| {
+                ui.label("measure");
+                ui.add(egui::TextEdit::singleline(&mut self.fill.measure).desired_width(50.0).font(egui::TextStyle::Monospace));
+                ui.label("beat");
+                ui.add(egui::TextEdit::singleline(&mut self.fill.beat).desired_width(50.0).font(egui::TextStyle::Monospace));
+                ui.label("end");
+                ui.add(egui::TextEdit::singleline(&mut self.fill.end).desired_width(50.0).font(egui::TextStyle::Monospace));
+                let mut lf = self.fill.linefeed.is_some();
+                if ui.checkbox(&mut lf, "linefeed").on_hover_text("A linefeed this many ticks after the measure's last beat").changed() {
+                    self.fill.linefeed = lf.then_some(self.fill.linefeed.unwrap_or(30));
+                }
+                if let Some(d) = self.fill.linefeed.as_mut() {
+                    ui.add(egui::DragValue::new(d).range(1..=240).suffix(" ticks"));
+                }
+                if ui.small_button("Default").clicked() {
+                    self.fill = FillSet::default();
+                }
+            });
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_source("lyr_fill_m").selected_text(FILL_METHODS[self.fill_method as usize]).width(180.0).show_ui(ui, |ui| {
+                    for (k, m) in FILL_METHODS.iter().enumerate() {
+                        ui.selectable_value(&mut self.fill_method, k as u8, *m);
+                    }
+                });
+                if ui.button("Insert Fill Lyrics").on_hover_text("On the beats of this track's song, where the chosen method allows").clicked() {
+                    let (set, method, enc, tm) = (self.fill.clone(), self.fill_method, self.enc, tm.clone());
+                    let end = tracks.iter().flat_map(|t| t.notes.iter().map(|n| n.tick + n.dur)).max().unwrap_or(0);
+                    out.push(LyricAction::Edit(Box::new(move |tr| {
+                        insert_fill(&mut tr[ti], &tm, end, &set, method, enc);
+                    })));
+                    out.push(LyricAction::Status("Fill Lyrics inserted (undo with Ctrl+Z).".into()));
+                }
+                if ui.button("Delete Fill Lyrics").on_hover_text("Lyrics that are exactly these strings, and their linefeeds").clicked() {
+                    let (set, enc) = (self.fill.clone(), self.enc);
+                    out.push(LyricAction::Edit(Box::new(move |tr| {
+                        delete_fill(&mut tr[ti], &set, enc);
+                    })));
+                    out.push(LyricAction::Status("Fill Lyrics deleted (undo with Ctrl+Z).".into()));
                 }
             });
         });
@@ -559,12 +953,16 @@ fn pos3(tm: &TimeMap, t: u32) -> String {
 }
 
 /// The export text (lyrics of `track`, XF chords of the whole song).
-pub fn export_text(tracks: &[EditTrack], track: usize, tm: &TimeMap, enc: Enc, file: &str) -> String {
-    let mut rows: Vec<(u32, String)> = lyrics(&tracks[track])
-        .into_iter()
-        .map(|(t, _, d)| (t, format!("Lyr\t{}\t\"{}\"", pos3(tm, t), enc.decode(&d).replace(['\r', '\n'], " "))))
-        .collect();
-    for tr in tracks {
+pub fn export_text(tracks: &[EditTrack], track: usize, tm: &TimeMap, enc: Enc, file: &str, mode: u8) -> String {
+    let mut rows: Vec<(u32, String)> = if mode == 2 {
+        Vec::new()
+    } else {
+        lyrics(&tracks[track])
+            .into_iter()
+            .map(|(t, _, d)| (t, format!("Lyr\t{}\t\"{}\"", pos3(tm, t), enc.decode(&d).replace(['\r', '\n'], " "))))
+            .collect()
+    };
+    for tr in tracks.iter().filter(|_| mode != 1) {
         for e in &tr.others {
             if let Event::Meta { t, mtype: 0x7F, data } = e {
                 if let Some(c) = xf_chord_name(data) {
@@ -611,17 +1009,21 @@ pub fn parse_text(text: &str, tm: &TimeMap) -> (Vec<(u32, String)>, Vec<(u32, Ve
 }
 
 /// Replace the lyrics of `track` (and, when given, the song's XF chords, put on `master`).
-pub fn apply_import(tr: &mut [EditTrack], track: usize, master: usize, lyr: &[(u32, String)], chd: &[(u32, Vec<u8>)], enc: Enc) {
+pub fn apply_import(tr: &mut [EditTrack], track: usize, master: usize, lyr: &[(u32, String)], chd: &[(u32, Vec<u8>)], enc: Enc, replace: bool) {
     if !lyr.is_empty() {
-        tr[track].others.retain(|e| !matches!(e, Event::Meta { mtype: LYRIC, .. }));
+        if replace {
+            tr[track].others.retain(|e| !matches!(e, Event::Meta { mtype: LYRIC, .. }));
+        }
         for (t, s) in lyr {
             tr[track].others.push(Event::Meta { t: *t, mtype: LYRIC, data: enc.encode(s) });
         }
     }
-    if !chd.is_empty() {
+    if !chd.is_empty() && replace {
         for t in tr.iter_mut() {
             t.others.retain(|e| !matches!(e, Event::Meta { mtype: 0x7F, data, .. } if xf_chord_name(data).is_some()));
         }
+    }
+    if !chd.is_empty() {
         for (t, d) in chd {
             tr[master].others.push(Event::Meta { t: *t, mtype: 0x7F, data: d.clone() });
         }
@@ -655,6 +1057,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fill_lyrics_like_psruti() {
+        // 4/4, 480 ppqn: 3 bars of notes, lyrics in bar 2
+        let n = |t| xgworks_core::EditNote { tick: t, dur: 100, pitch: 60, vel: 100 };
+        let mut t = EditTrack { notes: vec![n(0), n(5760 - 100)], others: vec![Event::Meta { t: 1920 + 480, mtype: LYRIC, data: b"la ".to_vec() }], ..Default::default() };
+        let tm = TimeMap::new(std::slice::from_ref(&t), 480);
+        let set = FillSet::default();
+        // not in measures with lyrics: bars 1 and 3, 4 beats each
+        assert_eq!(insert_fill(&mut t, &tm, 5760, &set, 2, Enc::Cp1250), 8);
+        let texts: Vec<(u32, String)> = { let mut v: Vec<_> = lyrics(&t).into_iter().map(|(t, _, d)| (t, Enc::Cp1250.decode(&d))).collect(); v.sort(); v };
+        assert_eq!(texts[0], (0, ".-- ".to_string()));
+        assert_eq!(texts[1], (480, "--- ".to_string()));
+        assert_eq!(texts[3], (1440, "---".to_string()));
+        assert_eq!(texts[4], (1470, "\r".to_string()), "linefeed 30 ticks after the last beat");
+        // deleting leaves the song's own lyric
+        assert_eq!(delete_fill(&mut t, &set, Enc::Cp1250), 10);
+        assert_eq!(lyrics(&t).len(), 1);
+        // not in beats with lyrics: bar 2 gets its free beats too
+        assert_eq!(insert_fill(&mut t, &tm, 5760, &set, 1, Enc::Cp1250), 11);
+    }
+
+    #[test]
+    fn utf8_lyrics_converted() {
+        let mut t = vec![EditTrack { others: vec![Event::Meta { t: 0, mtype: LYRIC, data: "Řeka ů € ł ő".as_bytes().to_vec() }], ..Default::default() }];
+        assert!(looks_utf8([t[0].others.iter().map(|e| if let Event::Meta { data, .. } = e { data.as_slice() } else { &[] }).next().unwrap()]));
+        assert_eq!(convert_song_lyrics(&mut t, Enc::Utf8, Enc::Cp1250), 1);
+        let Event::Meta { data, .. } = &t[0].others[0] else { panic!() };
+        assert_eq!(Enc::Cp1250.decode(data), "Řeka ů € ł ő");
+        assert!(!looks_utf8([data.as_slice()]), "Windows-1250 bytes are not UTF-8");
+        // a letter 1252 lacks loses its diacritic, never "?"
+        let mut t = vec![EditTrack { others: vec![Event::Meta { t: 0, mtype: LYRIC, data: "č".as_bytes().to_vec() }], ..Default::default() }];
+        convert_song_lyrics(&mut t, Enc::Utf8, Enc::Cp1252);
+        let Event::Meta { data, .. } = &t[0].others[0] else { panic!() };
+        assert_eq!(data, b"c");
+        assert_eq!(decode_file("\u{feff}Lyr".as_bytes()), "Lyr");
+        assert_eq!(decode_file(&Enc::Cp1250.encode("žluť")), "žluť");
+        assert_eq!(decode_file("žluť".as_bytes()), "žluť");
+    }
+
+    #[test]
+    fn diacritics_removed() {
+        assert_eq!(strip_diacritics("Příliš žluťoučký kůň úpěl ďábelské ódy. Straße"), "Prilis zlutoucky kun upel dabelske ody. Strasse");
+        let mut t = vec![EditTrack { others: vec![Event::Meta { t: 0, mtype: LYRIC, data: Enc::Cp1250.encode("Řeka ") }], ..Default::default() }];
+        assert_eq!(strip_song_diacritics(&mut t, Enc::Cp1250), 1);
+        let Event::Meta { data, .. } = &t[0].others[0] else { panic!() };
+        assert_eq!(data, b"Reka ");
+    }
+
+    #[test]
     fn syllables_and_marks() {
         let s = syllables("Hap-py birth-day\nto you\n\nNext page");
         assert_eq!(s, vec!["Hap", "py ", "birth", "day ", "/to ", "you ", "<Next ", "page "]);
@@ -667,13 +1117,14 @@ mod tests {
         tr[1].others.push(Event::Meta { t: 480, mtype: LYRIC, data: Enc::Cp1250.encode("Žlu") });
         tr[1].others.push(Event::Meta { t: 960, mtype: LYRIC, data: Enc::Cp1250.encode("ťou ") });
         tr[0].others.push(Event::Meta { t: 0, mtype: 0x7F, data: xf_chord_data("Am7/D").unwrap() });
-        let text = export_text(&tr, 1, &tm, Enc::Cp1250, "x.mid");
+        let text = export_text(&tr, 1, &tm, Enc::Cp1250, "x.mid", 0);
+        assert!(!export_text(&tr, 1, &tm, Enc::Cp1250, "x.mid", 1).contains("Chd"));
         assert!(text.contains("Lyr\t001:02:000\t\"Žlu\""), "{text}");
         assert!(text.contains("Chd\t001:01:000\tAm7/D"));
         let (l, c, bad) = parse_text(&text.replace("Žlu", "Žlu-"), &tm);
         assert_eq!((l.len(), c.len(), bad), (2, 1, 0));
         let mut tr2 = tr.clone();
-        apply_import(&mut tr2, 1, 0, &l, &c, Enc::Cp1250);
+        apply_import(&mut tr2, 1, 0, &l, &c, Enc::Cp1250, true);
         assert_eq!(Enc::Cp1250.decode(&lyrics(&tr2[1])[0].2), "Žlu-");
         assert_eq!(xf_chord_name(&xf_chord_data("F#m7(b5)").unwrap()).unwrap(), "F#m7(b5)");
         assert_eq!(from_shown(&to_shown("a b ")), "a b ");

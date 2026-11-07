@@ -8,14 +8,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::platform::{self, Instant};
-use crate::player::{self, open_device, send_dev, send_shared, PlayHandle, SharedOut};
-use crate::{clip, icons, jobwin, listwin, lyricwin, markerwin, midiio, staff, staff_svg, mixwin, pianoroll, pluginwin, xfwin, xged};
+use crate::player::{self, open_device, send_dev, PlayHandle, SharedOut};
+use crate::{chordwin, clip, icons, jobwin, listwin, lyricwin, markerwin, midiio, staff, staff_svg, mixwin, pianoroll, pluginwin, xfwin, xged};
 
 use eframe::egui;
 use xgworks_core::mixer::{self, PartMix};
 use xgworks_core::{edit_model, edit_playback_plan, EditTrack, Event};
 
-/// Command-line style options: `<file> [--roll N] [--list N] [--mixer] [--xg]`
+/// Command-line style options: `<file> [--roll N] [--list N] [--mixer] [--xg]
+/// [--no-transport] [--zoom-h N] [--zoom-v N]`
 /// (open views directly; handy for side-by-side checks against the original).
 fn apply_args(app: &mut App, args: &[String]) {
     let mut it = args.iter();
@@ -51,10 +52,54 @@ fn apply_args(app: &mut App, args: &[String]) {
             }
             "--mixer" => app.show_mixer = true,
             "--lyrics" => app.open_lyrics(),
+            "--chords" => app.chords_win = Some(Default::default()),
+            "--vh" => app.vh = Some(vhwin::VhState::new(&app.edit)),
+            "--vh-src" => {
+                if let (Some(v), Some(n)) = (app.vh.as_mut(), it.next().and_then(|n| n.parse().ok())) {
+                    v.src = n;
+                }
+            }
+            "--bar" => {
+                if let Some(n) = it.next().and_then(|n| n.parse::<u32>().ok()) {
+                    let t = app.time_map().from_mbc(n.max(1), 1, 0);
+                    app.locate(t);
+                }
+            }
             "--chord" => app.open_chord_dialog(0),
             "--master" => app.open_master(),
             "--markers" => app.markers_win = Some(markerwin::MarkerState::new()),
             "--xg" => app.show_xg = true,
+            "--xgm" => app.show_xgm = true,
+            "--prefs" => app.show_prefs = true,
+            "--xgm-std" => {
+                if let Some(k) = it.next() {
+                    app.xgm_set_inst_key(k);
+                }
+            }
+            "--xgm-fx" => {
+                app.show_xgm = true;
+                app.xgm.fx_open = true;
+                app.xgm.fx_tab = it.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            }
+            "--xgm-drums" => {
+                app.show_xgm = true;
+                let ch: usize = it.next().and_then(|n| n.parse().ok()).unwrap_or(10);
+                app.xgm_open_drums(ch.saturating_sub(1));
+            }
+            "--xgm-pick" => {
+                app.show_xgm = true;
+                let ch: usize = it.next().and_then(|n| n.parse().ok()).unwrap_or(1);
+                app.xgm_open_picker(ch.saturating_sub(1));
+            }
+            "--no-transport" => app.show_transport = false,
+            // zoom steps, + = in, - = out (the horizontal one applies at the first draw)
+            "--zoom-h" => app.tv_hzoom_pending = it.next().and_then(|n| n.parse().ok()).unwrap_or(0),
+            "--zoom-v" => {
+                let n: i32 = it.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+                for _ in 0..n.unsigned_abs() {
+                    app.tv_zoom(false, n > 0);
+                }
+            }
             "--autoplay" | "--importer" => {
                 let files = it.next().and_then(|f| platform::read(std::path::Path::new(f))).map(|b| pluginwin::list_files(&b)).unwrap_or_default();
                 if a == "--autoplay" {
@@ -138,6 +183,15 @@ struct App {
     /// Numpad 2 jumps back this many bars (Preferences, 2..4).
     rewind_bars: u32,
     show_prefs: bool,
+    /// Zoom remembered in the settings: Track View pixels per bar, Piano
+    /// Roll (pixels per quarter note, row height).
+    tv_bar_px: f32,
+    roll_zoom: Option<(f32, f32)>,
+    /// The editor a double-click on a track opens (Preferences): 0 Piano
+    /// Roll, 1 Event List, 2 Staff, 3 Drum.
+    dbl_editor: u8,
+    /// Size of all text and controls (Preferences), 0.7 … 2.0.
+    ui_scale: f32,
     /// The Transport window (the original's Control Panel), shown by default.
     show_transport: bool,
     player: Option<PlayHandle>,
@@ -172,6 +226,9 @@ struct App {
     port_map: Vec<Option<usize>>,
     show_mixer: bool,
     show_xg: bool,
+    /// XGM Editor (GM / GM2 / GS / XG parts, after Midifile Optimizer).
+    show_xgm: bool,
+    xgm: xgmwin::XgmState,
     open_rolls: Vec<(u64, pianoroll::RollState)>,
     next_roll_id: u64,
     clipboard: std::cell::RefCell<Vec<xgworks_core::EditNote>>,
@@ -195,12 +252,20 @@ struct App {
     view_t0: f32,
     px_per_tick: f32,
     row_scroll: f32,
+    /// Track View row height (vertical zoom, one of `TV_ROW_HS`).
+    row_h: f32,
+    /// `--zoom-h N`: horizontal zoom steps applied once the view is fitted.
+    tv_hzoom_pending: i32,
     /// Track View Trns cell being typed into: (track, text).
     trns_edit: Option<(usize, String)>,
     /// XF Information Editor (Job menu), open while Some.
     xf_dlg: Option<xfwin::XfDialog>,
     /// Lyrics / karaoke editor window, open while Some.
     lyrics: Option<lyricwin::LyricsState>,
+    /// Chord editor window (the Lyrics window's counterpart for XF chords).
+    chords_win: Option<chordwin::ChordsState>,
+    /// Vocal Harmony window (PSR-SX900).
+    vh: Option<vhwin::VhState>,
     /// Markers window (Edit ▸ Add Marker / Marker List), open while Some.
     markers_win: Option<markerwin::MarkerState>,
     /// Chord lane: selected chords (track, index), Chord Insert dialog, drag start tick.
@@ -209,6 +274,7 @@ struct App {
     chord_drag: Option<u32>,
     /// Edit ▸ block command dialog.
     block_dlg: Option<blockops::BlockDlg>,
+    demix_dlg: Option<demixdlg::DemixDlg>,
     /// Plug-in windows (Auto Play, Importer), open while Some.
     autoplay: Option<pluginwin::AutoPlay>,
     importer: Option<pluginwin::Importer>,
@@ -263,7 +329,10 @@ struct App {
     /// Record Mixer Parameter: channel -> track receiving the recorded moves.
     rec_tracks: [Option<usize>; 16],
     last_frame: Instant,
-    dev: u8,
+    /// XG Editor tool-bar dialog, its picked .SYX file, Play Monitor clock.
+    xg_dlg: Option<xgtools::XgDlg>,
+    xg_pick: platform::PickedFiles,
+    xg_mon: f64,
     /// Web: when the MIDI output list was last checked (access is granted,
     /// and devices come and go, while the app runs).
     out_poll: f64,
@@ -297,6 +366,10 @@ impl App {
             loop_on: false,
             rewind_bars: 2,
             show_prefs: false,
+            tv_bar_px: TV_BAR_PX_DEFAULT,
+            roll_zoom: None,
+            dbl_editor: 0,
+            ui_scale: 1.0,
             show_transport: true,
             player: None,
             picked: Default::default(),
@@ -321,6 +394,8 @@ impl App {
             port_map: vec![None; 16],
             show_mixer: false,
             show_xg: false,
+            show_xgm: false,
+            xgm: Default::default(),
             open_rolls: Vec::new(),
             next_roll_id: 0,
             clipboard: std::cell::RefCell::new(Vec::new()),
@@ -338,16 +413,21 @@ impl App {
             view_t0: 0.0,
             px_per_tick: 0.0,
             row_scroll: 0.0,
+            row_h: ROW_H,
+            tv_hzoom_pending: 0,
             trns_edit: None,
             port_combo: None,
             jobs: jobwin::JobState::new(&platform::read(&platform::xg4("JobDll.ini")).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()),
             xf_dlg: None,
             lyrics: None,
+            chords_win: None,
+            vh: None,
             markers_win: None,
             chord_sel: Vec::new(),
             chord_dlg: None,
             chord_drag: None,
             block_dlg: None,
+            demix_dlg: None,
             tv_tool: TvTool::Arrow,
             tv_drag: None,
             bond_first: None,
@@ -371,7 +451,9 @@ impl App {
             saved_settings: String::new(),
             rec_tracks: [None; 16],
             last_frame: Instant::now(),
-            dev: 0,
+            xg_dlg: None,
+            xg_pick: Default::default(),
+            xg_mon: 0.0,
             out_poll: 0.0,
         };
         if let Some(text) = platform::load_settings() {
@@ -412,6 +494,29 @@ impl App {
                     }
                     devs[n - 1] = v.to_string();
                 }
+            } else if k == "TV Zoom" {
+                let mut it = v.split(',').map(|x| x.trim().parse::<f32>().ok());
+                if let Some(Some(b)) = it.next() {
+                    self.tv_bar_px = b.clamp(TV_BAR_PX[0], TV_BAR_PX[TV_BAR_PX.len() - 1]);
+                }
+                if let Some(Some(h)) = it.next() {
+                    if let Some(&r) = TV_ROW_HS.iter().find(|&&r| r == h) {
+                        self.row_h = r;
+                    }
+                }
+            } else if k == "Roll Zoom" {
+                let z: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                if z.len() == 2 {
+                    self.roll_zoom = Some((z[0], z[1]));
+                }
+            } else if k == "XG Model" {
+                if let Some(i) = self.xg.models().iter().position(|m| m.0 == v) {
+                    self.xg.select_model(i);
+                }
+            } else if k == "Double Click Editor" {
+                self.dbl_editor = v.trim().parse().unwrap_or(0).min(3);
+            } else if k == "UI Scale" {
+                self.ui_scale = v.trim().parse().unwrap_or(1.0f32).clamp(0.7, 2.0);
             } else if k == "Rewind Bars" {
                 self.rewind_bars = v.parse::<u32>().unwrap_or(2).clamp(2, 4);
             } else if k == "Font" {
@@ -429,6 +534,12 @@ impl App {
                 let b: Vec<bool> = v.chars().map(|c| c == '1').collect();
                 if b.len() == 4 {
                     *self.list_xg.borrow_mut() = xgworks_core::listev::XgDisp { sysex: b[0], note: b[1], cc: b[2], prog: b[3] };
+                }
+            } else if k == "XGM Instrument" {
+                self.xgm_set_inst_key(v);
+            } else if k == "XG Editor Setup" {
+                if let Some(su) = xged::XgSetup::from_line(v) {
+                    self.xg.setup = su;
                 }
             } else if k == "MIX OUTPORT" {
                 self.mix_port = v.parse::<u8>().unwrap_or(0).min(15);
@@ -480,6 +591,16 @@ impl App {
             t += &format!("Midi Out Dev{}={d}\r\n", k + 1);
         }
         t += &format!("[User Settings]\r\nMIX OUTPORT={}\r\nRewind Bars={}\r\n", self.mix_port, self.rewind_bars);
+        t += &format!("XG Editor Setup={}\r\n", self.xg.setup.to_line());
+        t += &format!("XGM Instrument={}\r\n", self.xgm_inst_key());
+        t += &format!("Double Click Editor={}\r\nUI Scale={:.2}\r\n", self.dbl_editor, self.ui_scale);
+        t += &format!("TV Zoom={:.2},{}\r\n", self.tv_bar_px, self.row_h);
+        if let Some((q, h)) = self.roll_zoom {
+            t += &format!("Roll Zoom={q:.3},{h}\r\n");
+        }
+        if let Some(m) = self.xg.models().get(self.xg.model_index()) {
+            t += &format!("XG Model={}\r\n", m.0);
+        }
         let x = *self.list_xg.borrow();
         let bit = |b: bool| if b { '1' } else { '0' };
         t += &format!("[List]\r\nXG Disp={}{}{}{}\r\n", bit(x.sysex), bit(x.note), bit(x.cc), bit(x.prog));
@@ -538,7 +659,7 @@ impl App {
         self.open_rolls.clear();
         self.open_lists.clear();
         self.view_t0 = 0.0;
-        self.px_per_tick = 0.0; // fit on first draw
+        self.px_per_tick = 0.0; // the original's default scale on first draw
         self.ppqn = ppqn.max(1);
         self.sel_track = self.edit.iter().position(|t| !t.notes.is_empty()).unwrap_or(0);
         self.rebuild_view();
@@ -621,7 +742,10 @@ impl App {
         };
         let from = if self.monitoring { 0 } else { self.song_pos };
         let tm = xgworks_core::listev::TimeMap::new(&tracks, ppqn);
-        let msgs = transport::from_position(edit_playback_plan(&tracks, ppqn), tm.to_ms(from));
+        let plan = edit_playback_plan(&tracks, ppqn);
+        // Vocal Harmony window: the harmony channel heard aloud
+        let plan = if self.monitoring { plan } else { self.vh_preview(plan) };
+        let msgs = transport::from_position(plan, tm.to_ms(from));
         let msgs = self.add_clicks(msgs, &tm, from);
         self.play_from = from;
         self.play_tm = Some(tm);
@@ -714,11 +838,6 @@ impl App {
         p as u8
     }
 
-    fn send(&mut self, bytes: &[u8]) {
-        if self.ensure_midi() {
-            send_shared(&self.midi, bytes);
-        }
-    }
 
 }
 
@@ -734,9 +853,23 @@ mod transport_win;
 mod chordlane;
 #[path = "blockops.rs"]
 mod blockops;
+#[path = "demixdlg.rs"]
+mod demixdlg;
+#[path = "xgtools.rs"]
+mod xgtools;
+#[path = "xgmwin.rs"]
+mod xgmwin;
+#[path = "xgmfx.rs"]
+mod xgmfx;
+#[path = "vhwin.rs"]
+mod vhwin;
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Preferences: size of text and controls
+        if (ctx.zoom_factor() - self.ui_scale).abs() > 0.001 {
+            ctx.set_zoom_factor(self.ui_scale);
+        }
         let picked = self.picked.borrow_mut().take();
         if let Some((name, bytes)) = picked {
             self.load(&bytes, &name);
@@ -746,6 +879,7 @@ impl eframe::App for App {
         self.save_question(ctx);
         self.transport_keys(ctx);
         self.loop_check();
+        self.xg_bulk_tick();
         self.record_tick();
         self.prefs_window(ctx);
         self.transport_window(ctx);
@@ -803,6 +937,15 @@ impl eframe::App for App {
                         self.markers_win.get_or_insert_with(markerwin::MarkerState::new);
                         ui.close_menu();
                     }
+                    ui.separator();
+                    if ui.add_enabled(has, egui::Button::new("Remove Diacritics (Lyrics)")).on_hover_text("Every lyric and text event of the song without č ř ů … (Windows-1250; undo-able)").clicked() {
+                        self.tv_snapshot();
+                        let enc = self.lyrics.as_ref().map_or(lyricwin::Enc::Cp1250, |l| l.enc());
+                        let n = lyricwin::strip_song_diacritics(&mut self.edit, enc);
+                        self.song_edited();
+                        self.status = format!("Diacritics removed from {n} lyric / text events.");
+                        ui.close_menu();
+                    }
                 });
                 self.setup_menu(ui);
                 ui.add_enabled_ui(has, |ui| {
@@ -813,6 +956,8 @@ impl eframe::App for App {
                                 ui.close_menu();
                             }
                         }
+                        ui.separator();
+                        self.demix_menu(ui);
                         ui.separator();
                         if ui.button("XF Information Editor...").clicked() {
                             self.xf_dlg = Some(xfwin::XfDialog::new(xgworks_core::xfinfo::read(&self.edit)));
@@ -858,6 +1003,11 @@ impl eframe::App for App {
                         self.xg.sync_from_song(&self.edit);
                         ui.close_menu();
                     }
+                    if ui.add_enabled(has, egui::Button::new("XGM Editor (GM/GS/XG)")).clicked() {
+                        self.show_xgm = true;
+                        self.xg.sync_from_song(&self.edit);
+                        ui.close_menu();
+                    }
                     if ui.button("Transport              Alt+F7").clicked() {
                         self.show_transport = !self.show_transport;
                         ui.close_menu();
@@ -868,6 +1018,16 @@ impl eframe::App for App {
                     }
                     if ui.add_enabled(has, egui::Button::new("Lyrics / Karaoke       F9")).clicked() {
                         self.open_lyrics();
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(has, egui::Button::new("Chords")).clicked() {
+                        self.chords_win.get_or_insert_with(Default::default);
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(has, egui::Button::new("Vocal Harmony (PSR-SX900)")).clicked() {
+                        if self.vh.is_none() {
+                            self.vh = Some(vhwin::VhState::new(&self.edit));
+                        }
                         ui.close_menu();
                     }
                     ui.separator();
@@ -913,6 +1073,8 @@ impl eframe::App for App {
                         self.bond_first = None;
                     }
                 }
+                ui.add_space(8.0);
+                self.zoom_buttons(ui);
                 ui.spacing_mut().item_spacing.x = 6.0;
                 ui.add_space(8.0);
                 ui.separator();
@@ -946,7 +1108,7 @@ impl eframe::App for App {
                 ui.label(&self.status);
                 if !self.edit.is_empty() {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.weak("double-click a track = Piano Roll · Ctrl+wheel = zoom · wheel/Shift = scroll");
+                        ui.weak("double-click a track = Piano Roll · Ctrl+wheel / zoom buttons = zoom · wheel/Shift = scroll");
                     });
                 }
             });
@@ -982,17 +1144,40 @@ impl eframe::App for App {
         if self.show_xg && !self.edit.is_empty() {
             let names: Vec<(u8, String)> = self.edit.iter().map(|t| (t.channel & 0x0F, t.name.clone())).collect();
             let mut changes = Vec::new();
-            self.show_xg = sub_window(ctx, "xged", "XG Editor", [600.0, 640.0], |ui| changes = self.xg.ui(ui, &names));
-            if !changes.is_empty() {
-                for (addr, data) in &changes {
-                    self.send(&mixer::xg_param(self.dev, *addr, data));
+            if self.xg.has_panel(ctx) {
+                // the original's window; DETAIL and ASSIGN open their own
+                let title = self.xg.title();
+                let xg = &mut self.xg;
+                self.show_xg = fixed_window(ctx, "xged", &title, xged::xgpanel::CLIENT, |ui| changes = xg.panel_ui(ui));
+                if self.xg.panel.detail.is_some() {
+                    let xg = &mut self.xg;
+                    let mut more = Vec::new();
+                    if !sub_window(ctx, "xged_detail", "XG Editor - DETAIL", [480.0, 560.0], |ui| more = xg.detail_ui(ui, &names)) {
+                        self.xg.panel.detail = None;
+                    }
+                    changes.extend(more);
                 }
-                let dev = self.dev;
-                if let Some(t0) = self.edit.first_mut() {
-                    xgworks_core::xgtbl::apply_xg_changes(t0, dev, &changes);
+                if self.xg.panel.assign_dlg {
+                    let xg = &mut self.xg;
+                    let mut keep = true;
+                    if !sub_window(ctx, "xged_assign", "XG Editor Assignable Setup", [560.0, 210.0], |ui| keep = xg.assign_dialog(ui)) || !keep {
+                        self.xg.panel.assign_dlg = false;
+                    }
                 }
+            } else {
+                self.show_xg = sub_window(ctx, "xged", "XG Editor", [600.0, 640.0], |ui| {
+                    ui.colored_label(Color32::from_rgb(0xC0, 0x60, 0x00),
+                        platform::data_help("XGEditor.dll was not found, so the original XG Editor panel cannot be shown (plain lists instead)."));
+                    changes = self.xg.ui(ui, &names);
+                });
             }
+            for (addr, data) in std::mem::take(&mut self.xg.sends) {
+                self.xg_send(addr, &data);
+            }
+            self.xg_apply(&changes);
         }
+        self.xg_tools(ctx);
+        self.xgm_window(ctx);
         // piano rolls (each its own window; the track can be switched inside)
         if !self.open_rolls.is_empty() {
             let markers = self.markers();
@@ -1059,6 +1244,10 @@ impl eframe::App for App {
                 }
             }
             self.open_rolls = rolls;
+            // the Piano Roll zoom a new one opens with
+            if let Some(z) = self.open_rolls.iter().rev().find(|(_, st)| st.drum.is_none() && st.staff.is_none()).and_then(|(_, st)| st.zoom()) {
+                self.roll_zoom = Some(z);
+            }
             if edited {
                 self.rebuild_view();
             }
@@ -1123,9 +1312,12 @@ impl eframe::App for App {
         }
         self.plugin_windows(ctx);
         self.lyrics_window(ctx);
+        self.chords_window(ctx);
+        self.vh_window(ctx);
         self.markers_window(ctx);
         self.chord_dialog(ctx);
         self.block_dialog(ctx);
+        self.demix_dialog(ctx);
         // XF Information Editor
         if let Some(d) = &mut self.xf_dlg {
             match xfwin::ui(ctx, d) {
@@ -1343,6 +1535,16 @@ fn with_keys<R>(ctx: &egui::Context, active: bool, f: impl FnOnce() -> R) -> R {
 // Chord / Style lanes at the bottom. The unnamed conductor track is hidden.
 // ---------------------------------------------------------------------------
 const ROW_H: f32 = 20.0;
+/// Vertical zoom steps of the Track View rows (20 = the original's height).
+const TV_ROW_HS: [f32; 5] = [14.0, 20.0, 28.0, 40.0, 56.0];
+/// Horizontal zoom levels of the original's Track View in pixels per 4/4 bar
+/// (measured: Horizontal Zoom In / Out step through them and grey at the
+/// ends; a song opens at 20).
+const TV_BAR_PX: [f32; 7] = [5.0, 10.0, 20.0, 40.0, 80.0, 160.0, 320.0];
+const TV_BAR_PX_DEFAULT: f32 = 20.0;
+/// Width of the Track View scroll bars; length of their zoom buttons.
+const TV_SB: f32 = 20.0;
+const TV_ZB: f32 = 22.0;
 const TV_HEAD: Color32 = Color32::from_rgb(0x66, 0x00, 0x66);
 const TV_ROW: Color32 = Color32::from_rgb(0x82, 0x82, 0x82);
 const TV_LANE: Color32 = Color32::from_rgb(0x00, 0x40, 0x80);
@@ -1508,6 +1710,90 @@ impl App {
         (0..self.edit.len()).filter(|&i| !self.edit[i].conductor).collect()
     }
 
+    /// Pixels per tick for a zoom level in pixels per 4/4 bar.
+    fn tv_ppt(&self, bar_px: f32) -> f32 {
+        bar_px / (4.0 * self.ppqn.max(1) as f32)
+    }
+
+    /// The time scale, the original's default before the first draw.
+    fn tv_cur_ppt(&self) -> f32 {
+        if self.px_per_tick > 0.0 { self.px_per_tick } else { self.tv_ppt(TV_BAR_PX_DEFAULT) }
+    }
+
+    /// The next zoom level in / out from the current scale (a Ctrl+wheel
+    /// scale between two levels goes to the neighbouring one).
+    fn tv_next_ppt(&self, zin: bool) -> Option<f32> {
+        let cur = self.tv_cur_ppt();
+        let mut levels = TV_BAR_PX.iter().map(|&b| self.tv_ppt(b));
+        if zin { levels.find(|&p| p > cur * 1.0001) } else { levels.rev().find(|&p| p < cur * 0.9999) }
+    }
+
+    /// Track View zoom (Setup > Zoom, the tool bar's and the scroll bars'
+    /// zoom buttons): horizontal steps through the original's levels, vertical
+    /// steps the row height; at the largest / smallest size the command is
+    /// greyed, as in the original.
+    fn tv_can_zoom(&self, horiz: bool, zin: bool) -> bool {
+        if self.edit.is_empty() {
+            return false;
+        }
+        if horiz {
+            self.tv_next_ppt(zin).is_some()
+        } else {
+            let k = TV_ROW_HS.iter().position(|&h| h == self.row_h).unwrap_or(1);
+            if zin { k + 1 < TV_ROW_HS.len() } else { k > 0 }
+        }
+    }
+
+    fn tv_zoom(&mut self, horiz: bool, zin: bool) {
+        if !self.tv_can_zoom(horiz, zin) {
+            return;
+        }
+        if horiz {
+            // the left edge (scroll position) stays, as in the original
+            if let Some(p) = self.tv_next_ppt(zin) {
+                self.px_per_tick = p;
+            }
+        } else {
+            let k = TV_ROW_HS.iter().position(|&h| h == self.row_h).unwrap_or(1);
+            self.row_h = TV_ROW_HS[if zin { k + 1 } else { k - 1 }];
+        }
+    }
+
+    /// Setup > Zoom submenu (Menu.hlp: Zoom (Z) - H zoom in (I) / out (O), V zoom in (H) / out (L)).
+    pub(super) fn zoom_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Zoom", |ui| {
+            for (horiz, zin, label) in [
+                (true, true, "Horizontal Zoom In"),
+                (true, false, "Horizontal Zoom Out"),
+                (false, true, "Vertical Zoom In"),
+                (false, false, "Vertical Zoom Out"),
+            ] {
+                if ui.add_enabled(self.tv_can_zoom(horiz, zin), egui::Button::new(label)).clicked() {
+                    self.tv_zoom(horiz, zin);
+                    ui.close_menu();
+                }
+            }
+        });
+    }
+
+    /// The four zoom buttons of the tool bar (bitmap 2003, icons 18..21).
+    fn zoom_buttons(&mut self, ui: &mut egui::Ui) {
+        for (idx, horiz, zin, name, tip) in [
+            (icons::ZOOM_H_IN, true, true, "H+", "Horizontal Zoom In"),
+            (icons::ZOOM_H_OUT, true, false, "H-", "Horizontal Zoom Out"),
+            (icons::ZOOM_V_IN, false, true, "V+", "Vertical Zoom In"),
+            (icons::ZOOM_V_OUT, false, false, "V-", "Vertical Zoom Out"),
+        ] {
+            if idx == icons::ZOOM_V_IN {
+                ui.add_space(8.0);
+            }
+            let en = self.tv_can_zoom(horiz, zin);
+            if icons::tool_button_en(ui, icons::MAIN_BAR, idx, false, en, name, tip).clicked() {
+                self.tv_zoom(horiz, zin);
+            }
+        }
+    }
+
     fn track_view(&mut self, ui: &mut egui::Ui) {
         if self.edit.is_empty() {
             ui.centered_and_justified(|ui| ui.weak("Open an .XWS or .MID file."));
@@ -1517,12 +1803,20 @@ impl App {
         let aud = self.audible();
         let vis = self.visible_tracks();
         let bar = self.ppqn as u32 * 4;
-        let full = ui.available_rect_before_wrap();
+        let outer = ui.available_rect_before_wrap();
+        // scroll bars at the right and the bottom, as in the original
+        let full = egui::Rect::from_min_max(outer.min, egui::pos2(outer.right() - TV_SB, outer.bottom() - TV_SB));
         let hdr_w: f32 = TV_COLS.iter().map(|c| c.1).sum();
         let tl = egui::Rect::from_min_max(egui::pos2(full.left() + hdr_w + 4.0, full.top()), full.max);
         if self.px_per_tick <= 0.0 {
-            self.px_per_tick = (tl.width() - 20.0) / self.total_ticks.max(1) as f32; // fit
+            self.px_per_tick = self.tv_ppt(self.tv_bar_px);
         }
+        while self.tv_hzoom_pending != 0 {
+            let zin = self.tv_hzoom_pending > 0;
+            self.tv_zoom(true, zin);
+            self.tv_hzoom_pending -= if zin { 1 } else { -1 };
+        }
+        let row_h = self.row_h;
         // wheel: Ctrl = zoom, Shift / horizontal = scroll time, plain = scroll rows
         if ui.rect_contains_pointer(full) {
             let (scroll, zoom, ctrl, shift, mouse) =
@@ -1530,15 +1824,17 @@ impl App {
             if ctrl && zoom != 1.0 {
                 let mx = mouse.map_or(0.0, |p| (p.x - tl.left()).max(0.0));
                 let at = self.view_t0 + mx / self.px_per_tick;
-                self.px_per_tick = (self.px_per_tick * zoom).clamp(0.002, 2.0);
+                self.px_per_tick = (self.px_per_tick * zoom).clamp(self.tv_ppt(TV_BAR_PX[0]), self.tv_ppt(TV_BAR_PX[TV_BAR_PX.len() - 1]));
                 self.view_t0 = (at - mx / self.px_per_tick).max(0.0);
             } else if shift || scroll.x != 0.0 {
                 let d = if scroll.x != 0.0 { scroll.x } else { scroll.y };
                 self.view_t0 = (self.view_t0 - d / self.px_per_tick).clamp(0.0, self.total_ticks as f32);
             } else if scroll.y != 0.0 {
-                self.row_scroll = (self.row_scroll - scroll.y / ROW_H).max(0.0);
+                self.row_scroll = (self.row_scroll - scroll.y / self.row_h).max(0.0);
             }
         }
+        // remembered for the next song / start
+        self.tv_bar_px = self.px_per_tick * 4.0 * self.ppqn.max(1) as f32;
         let (t0, ppt) = (self.view_t0, self.px_per_tick);
         let x_of = |t: u32| tl.left() + (t as f32 - t0) * ppt;
         let p = ui.painter_at(full);
@@ -1557,7 +1853,10 @@ impl App {
         }
         let ruler = egui::Rect::from_min_max(egui::pos2(tl.left(), full.top()), egui::pos2(tl.right(), full.top() + ROW_H));
         p.rect_filled(ruler, 0.0, TV_LANE);
-        let step = ((36.0 / (bar as f32 * ppt)).ceil() as u32).max(1);
+        // bar numbers as in the original: every bar from 160 px per bar, every
+        // 4th from 20, every 16th below
+        let bar_px = bar as f32 * ppt;
+        let step = if bar_px >= 159.0 { 1 } else if bar_px >= 19.0 { 4 } else { 16 };
         let markers = self.markers();
         let mut b = (t0 as u32) / bar;
         while x_of(b * bar) <= ruler.right() {
@@ -1583,7 +1882,7 @@ impl App {
         // ---- track rows (pool rows after the used tracks, like the original)
         let bottom_lanes = 2.0 * ROW_H * 2.0;
         let rows_area = egui::Rect::from_min_max(egui::pos2(full.left(), head.bottom()), egui::pos2(full.right(), full.bottom() - bottom_lanes));
-        let rows_fit = (rows_area.height() / ROW_H).floor() as usize;
+        let rows_fit = (rows_area.height() / row_h).floor() as usize;
         let total_rows = (vis.len() + 30).max(rows_fit);
         self.row_scroll = self.row_scroll.min(total_rows.saturating_sub(rows_fit) as f32);
         let first = self.row_scroll as usize;
@@ -1601,9 +1900,9 @@ impl App {
         }
         for r in 0..rows_fit.min(total_rows - first) {
             let row = first + r;
-            let y = rows_area.top() + r as f32 * ROW_H;
-            let hdr = egui::Rect::from_min_size(egui::pos2(full.left(), y), egui::vec2(hdr_w, ROW_H));
-            let lane = egui::Rect::from_min_max(egui::pos2(tl.left(), y), egui::pos2(tl.right(), y + ROW_H));
+            let y = rows_area.top() + r as f32 * row_h;
+            let hdr = egui::Rect::from_min_size(egui::pos2(full.left(), y), egui::vec2(hdr_w, row_h));
+            let lane = egui::Rect::from_min_max(egui::pos2(tl.left(), y), egui::pos2(tl.right(), y + row_h));
             rp.line_segment([lane.left_bottom(), lane.right_bottom()], egui::Stroke::new(1.0_f32, TV_GRID));
             let ti = vis.get(row).copied();
             self.tv_row(&rp, ui, hdr, lane, row, ti, &aud, &x_of, bar);
@@ -1628,7 +1927,7 @@ impl App {
         self.port_column(ui, &vis, rows_area, first, rows_fit.min(total_rows - first), full.left() + TV_COLS[0].1);
         self.trk_column(ui, &vis, rows_area, first, rows_fit.min(total_rows - first));
         let lanes = egui::Rect::from_min_max(egui::pos2(tl.left(), rows_area.top()), rows_area.max);
-        self.tv_tools(ui, &vis, TvGeo { lanes, first, t0: self.view_t0, ppt: self.px_per_tick });
+        self.tv_tools(ui, &vis, TvGeo { lanes, first, t0: self.view_t0, ppt: self.px_per_tick, row_h });
 
         // ---- Chord / Style lanes
         let cl = egui::Rect::from_min_max(egui::pos2(full.left(), full.bottom() - bottom_lanes), full.max);
@@ -1664,7 +1963,49 @@ impl App {
                 free_x = r.right() + 4.0;
             }
         }
-        ui.allocate_rect(full, egui::Sense::hover());
+        self.tv_scroll_bars(ui, outer, full, tl, rows_area, rows_fit, total_rows);
+        ui.allocate_rect(outer, egui::Sense::hover());
+    }
+
+    /// The Track View's scroll bars: vertical beside the track rows, horizontal
+    /// under the time line (the one under the columns stays disabled, the
+    /// columns always fit). At the ends, Cubase-style zoom buttons with the
+    /// original's tool bar magnifiers: V out / in under the vertical bar,
+    /// H out / in after the horizontal one.
+    #[allow(clippy::too_many_arguments)]
+    fn tv_scroll_bars(&mut self, ui: &mut egui::Ui, outer: egui::Rect, full: egui::Rect, tl: egui::Rect,
+                      rows: egui::Rect, rows_fit: usize, total_rows: usize) {
+        let p = ui.painter_at(outer);
+        let face = Color32::from_gray(0xD4);
+        let (sb, bar) = (TV_SB, self.ppqn as f32 * 4.0);
+        // vertical: track rows
+        let vz = rows.bottom() - 2.0 * TV_ZB;
+        let vr = egui::Rect::from_min_max(egui::pos2(full.right(), full.top()), egui::pos2(outer.right(), vz));
+        let (page, total) = (rows_fit as f32, total_rows as f32);
+        icons::scroll_bar(ui, vr, true, &mut self.row_scroll, page, total, 1.0, "tv_vsb");
+        p.rect_filled(egui::Rect::from_min_max(egui::pos2(full.right(), rows.bottom()), outer.max), 0.0, face);
+        // horizontal: time line
+        let hz = full.right() - 2.0 * TV_ZB;
+        let hr = egui::Rect::from_min_max(egui::pos2(tl.left(), full.bottom()), egui::pos2(hz, outer.bottom()));
+        let page = tl.width() / self.px_per_tick;
+        let total = (self.total_ticks as f32 + 4.0 * bar).max(self.view_t0 + page);
+        icons::scroll_bar(ui, hr, false, &mut self.view_t0, page, total, bar, "tv_hsb");
+        let cols = egui::Rect::from_min_max(egui::pos2(full.left(), full.bottom()), egui::pos2(tl.left() - 4.0, outer.bottom()));
+        let mut none = 0.0;
+        icons::scroll_bar(ui, cols, false, &mut none, 1.0, 1.0, 1.0, "tv_csb");
+        p.rect_filled(egui::Rect::from_min_max(egui::pos2(tl.left() - 4.0, full.bottom()), egui::pos2(tl.left(), outer.bottom())), 0.0, face);
+        // zoom buttons
+        for (r, idx, horiz, zin, tip) in [
+            (egui::Rect::from_min_size(egui::pos2(full.right(), vz), egui::vec2(sb, TV_ZB)), icons::ZOOM_V_OUT, false, false, "Vertical Zoom Out"),
+            (egui::Rect::from_min_size(egui::pos2(full.right(), vz + TV_ZB), egui::vec2(sb, TV_ZB)), icons::ZOOM_V_IN, false, true, "Vertical Zoom In"),
+            (egui::Rect::from_min_size(egui::pos2(hz, full.bottom()), egui::vec2(TV_ZB, sb)), icons::ZOOM_H_OUT, true, false, "Horizontal Zoom Out"),
+            (egui::Rect::from_min_size(egui::pos2(hz + TV_ZB, full.bottom()), egui::vec2(TV_ZB, sb)), icons::ZOOM_H_IN, true, true, "Horizontal Zoom In"),
+        ] {
+            let en = self.tv_can_zoom(horiz, zin);
+            if icons::icon_button_at(ui, r, icons::MAIN_BAR, idx, en, tip, ("tv_zoom", idx)).clicked() {
+                self.tv_zoom(horiz, zin);
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1677,7 +2018,7 @@ impl App {
         let mut x = hdr.left();
         let mut cells: Vec<egui::Rect> = Vec::new();
         for (_, w) in TV_COLS {
-            cells.push(egui::Rect::from_min_size(egui::pos2(x, hdr.top()), egui::vec2(w, ROW_H)));
+            cells.push(egui::Rect::from_min_size(egui::pos2(x, hdr.top()), egui::vec2(w, hdr.height())));
             x += w;
         }
         p.rect_filled(cells[0].shrink(1.0), 0.0, Color32::from_gray(0xF0));
@@ -1816,7 +2157,7 @@ impl App {
         if resp.double_clicked() {
             if let Some(pos) = resp.interact_pointer_pos() {
                 if !cells[5].contains(pos) && !cells[6].contains(pos) && !cells[7].contains(pos) {
-                    self.open_roll(ti);
+                    self.open_track_editor(ti);
                 }
             }
         }
@@ -1948,9 +2289,10 @@ impl App {
     /// cells (cyan) and shows the drop-down in the bottom one, whose choice
     /// then applies to all of them (Track.hlp).
     fn port_column(&mut self, ui: &egui::Ui, vis: &[usize], rows: egui::Rect, first: usize, shown: usize, x: f32) {
-        let col = egui::Rect::from_min_size(egui::pos2(x, rows.top()), egui::vec2(TV_COLS[1].1, shown as f32 * ROW_H));
+        let col = egui::Rect::from_min_size(egui::pos2(x, rows.top()), egui::vec2(TV_COLS[1].1, shown as f32 * self.row_h));
         let resp = ui.interact(col, ui.id().with("tv_port_col"), egui::Sense::click_and_drag());
-        let row_at = |y: f32| (first + ((y - rows.top()) / ROW_H).max(0.0) as usize).min(first + shown.saturating_sub(1));
+        let row_h = self.row_h;
+        let row_at = |y: f32| (first + ((y - rows.top()) / row_h).max(0.0) as usize).min(first + shown.saturating_sub(1));
         let pos = resp.interact_pointer_pos();
         if let Some(pos) = pos {
             if resp.drag_started() {
@@ -2122,6 +2464,19 @@ impl App {
         }
     }
 
+    /// The editor chosen in Preferences for a double-click on a track.
+    fn open_track_editor(&mut self, ti: usize) {
+        match self.dbl_editor {
+            1 => {
+                self.sel_track = ti;
+                self.open_list(vec![listwin::Span { track: ti, block: None }]);
+            }
+            2 => self.open_staff(ti),
+            3 => self.open_drum(ti),
+            _ => self.open_roll(ti),
+        }
+    }
+
     /// Open a List window for the selected blocks (else the selected track).
     fn open_list(&mut self, spans: Vec<listwin::Span>) {
         if spans.is_empty() {
@@ -2179,12 +2534,24 @@ impl App {
                     self.xg.sync_from_song(&self.edit); // pick up mixer / song changes
                 }
             }
+            if editor_button(ui, Some((MAIN_BAR, 16)), Vk::Xg, "XGM", self.show_xgm, "XGM Editor: the parts' sounds for a GM / GM2 / GS / XG instrument").clicked() {
+                self.show_xgm = !self.show_xgm;
+                if self.show_xgm {
+                    self.xg.sync_from_song(&self.edit);
+                }
+            }
             if editor_button(ui, None, Vk::Lyrics, "Lyrics", self.lyrics.is_some(), "Lyrics / Karaoke editor (F9)").clicked() {
                 if self.lyrics.is_some() {
                     self.lyrics = None;
                 } else {
                     self.open_lyrics();
                 }
+            }
+            if editor_button(ui, None, Vk::Lyrics, "Chords", self.chords_win.is_some(), "Chord editor (XF chords)").clicked() {
+                self.chords_win = if self.chords_win.is_some() { None } else { Some(Default::default()) };
+            }
+            if editor_button(ui, None, Vk::Lyrics, "VH", self.vh.is_some(), "Vocal Harmony (Yamaha PSR-SX900): harmony channel, notes from chords, VH SysEx").clicked() {
+                self.vh = if self.vh.is_some() { None } else { Some(vhwin::VhState::new(&self.edit)) };
             }
             if editor_button(ui, None, Vk::Markers, "Markers", self.markers_win.is_some(), "Add Marker / Marker List").clicked() {
                 if self.markers_win.is_some() {
@@ -2254,6 +2621,38 @@ impl App {
     }
 
     /// Lyrics window and its actions.
+    /// The Chord editor window.
+    fn chords_window(&mut self, ctx: &egui::Context) {
+        let Some(mut st) = self.chords_win.take() else { return };
+        if self.edit.is_empty() {
+            return;
+        }
+        let tm = self.time_map();
+        let (pos, playing) = (self.cur_tick(), self.playing);
+        let master = self.master_track().unwrap_or(0);
+        let fname = self.file_name.clone();
+        let mut acts = Vec::new();
+        let open = sub_window(ctx, "chords", "Chords", [900.0, 560.0], |ui| acts = st.ui(ui, &self.edit, &tm, pos, playing, master, &fname));
+        for a in acts {
+            match a {
+                chordwin::ChordAction::Edit(f) => {
+                    self.tv_snapshot();
+                    f(&mut self.edit);
+                    self.extend_blocks(master);
+                    self.song_edited();
+                }
+                chordwin::ChordAction::Locate(t) => self.locate(t),
+                chordwin::ChordAction::Status(m) => self.status = m,
+            }
+        }
+        if open {
+            self.chords_win = Some(st);
+        }
+        if self.playing {
+            ctx.request_repaint();
+        }
+    }
+
     fn lyrics_window(&mut self, ctx: &egui::Context) {
         let Some(mut st) = self.lyrics.take() else { return };
         let vis = self.visible_tracks();
@@ -2356,7 +2755,12 @@ impl App {
     fn open_roll(&mut self, i: usize) {
         self.sel_track = i;
         if !self.open_rolls.iter().any(|(_, st)| st.track == i) {
-            self.open_rolls.push((self.next_roll_id, pianoroll::RollState::new(i)));
+            let mut st = pianoroll::RollState::new(i);
+            if let Some((ppq, kh)) = self.roll_zoom {
+                st.preset_ppq = Some(ppq);
+                st.set_key_h(kh);
+            }
+            self.open_rolls.push((self.next_roll_id, st));
             self.next_roll_id += 1;
         }
     }
@@ -2368,7 +2772,7 @@ impl App {
             .iter()
             .flat_map(|t| t.others.iter())
             .filter_map(|e| match e {
-                Event::Meta { t, mtype: 0x06, data } => Some((*t, String::from_utf8_lossy(data).trim().to_string())),
+                Event::Meta { t, mtype: 0x06, data } => Some((*t, xgworks_core::textenc::decode(data).trim().to_string())),
                 _ => None,
             })
             .collect();
@@ -2659,11 +3063,12 @@ struct TvGeo {
     first: usize,
     t0: f32,
     ppt: f32,
+    row_h: f32,
 }
 
 impl TvGeo {
     fn row_at(&self, y: f32) -> usize {
-        self.first + ((y - self.lanes.top()) / ROW_H).max(0.0) as usize
+        self.first + ((y - self.lanes.top()) / self.row_h).max(0.0) as usize
     }
     fn tick_at(&self, x: f32) -> u32 {
         ((x - self.lanes.left()) / self.ppt + self.t0).max(0.0) as u32
@@ -2672,7 +3077,7 @@ impl TvGeo {
         self.lanes.left() + (t as f32 - self.t0) * self.ppt
     }
     fn row_y(&self, row: usize) -> f32 {
-        self.lanes.top() + (row as f32 - self.first as f32) * ROW_H
+        self.lanes.top() + (row as f32 - self.first as f32) * self.row_h
     }
 }
 
@@ -2714,8 +3119,9 @@ impl App {
             }
         }
         // right click: the tools pop-up menu (any tool)
+        // (also on the track's columns: the whole row)
         if let Some(p) = ctx.input(|i| if i.pointer.secondary_clicked() { i.pointer.interact_pos() } else { None }) {
-            if g.lanes.contains(p) {
+            if g.lanes.y_range().contains(p.y) && p.x <= g.lanes.right() && p.x >= g.lanes.left() - TV_COLS.iter().map(|c| c.1).sum::<f32>() - 4.0 {
                 self.tv_menu = Some(p);
             }
         }
@@ -2758,14 +3164,14 @@ impl App {
             Some(TvDrag::Create { row, from, cur }) => {
                 let (s, e) = (from.min(cur) / bar * bar, (from.max(cur) / bar + 1) * bar);
                 let y = g.row_y(row);
-                p.rect_stroke(egui::Rect::from_min_max(egui::pos2(g.x_of(s), y + 4.0), egui::pos2(g.x_of(e), y + ROW_H - 4.0)), 0.0, white);
+                p.rect_stroke(egui::Rect::from_min_max(egui::pos2(g.x_of(s), y + 4.0), egui::pos2(g.x_of(e), y + g.row_h - 4.0)), 0.0, white);
             }
             Some(TvDrag::Resize { ti, bi, cur }) => {
                 if let Some(b) = self.edit[ti].blocks.get(bi) {
                     let e = self.resize_end(ti, bi, cur);
                     let row = vis.iter().position(|&t| t == ti).unwrap_or(0);
                     let y = g.row_y(row);
-                    p.rect_stroke(egui::Rect::from_min_max(egui::pos2(g.x_of(b.start), y + 4.0), egui::pos2(g.x_of(e), y + ROW_H - 4.0)), 0.0, white);
+                    p.rect_stroke(egui::Rect::from_min_max(egui::pos2(g.x_of(b.start), y + 4.0), egui::pos2(g.x_of(e), y + g.row_h - 4.0)), 0.0, white);
                 }
             }
             Some(TvDrag::Frame { from, cur }) => {
@@ -2776,7 +3182,7 @@ impl App {
         if let Some((ti, bi)) = self.bond_first {
             if let (Some(row), Some(b)) = (vis.iter().position(|&t| t == ti), self.edit.get(ti).and_then(|t| t.blocks.get(bi))) {
                 let y = g.row_y(row);
-                p.rect_stroke(egui::Rect::from_min_max(egui::pos2(g.x_of(b.start), y + 3.0), egui::pos2(g.x_of(b.end).max(g.x_of(b.start) + 12.0), y + ROW_H - 3.0)), 0.0,
+                p.rect_stroke(egui::Rect::from_min_max(egui::pos2(g.x_of(b.start), y + 3.0), egui::pos2(g.x_of(b.end).max(g.x_of(b.start) + 12.0), y + g.row_h - 3.0)), 0.0,
                     egui::Stroke::new(2.0_f32, Color32::YELLOW));
             }
         }
@@ -2942,6 +3348,55 @@ impl App {
                     self.pending_paste = true;
                     close = true;
                 }
+                // every editor, for the track under the click
+                ui.separator();
+                let on_track = vis.get(g.row_at(at.y)).copied();
+                ui.label(egui::RichText::new("Open").small().weak());
+                for (k, name) in ["Piano Roll", "Event List", "Staff", "Drum", "Lyrics", "Chords", "Master Track", "Mixer", "XG Editor", "XGM Editor"].into_iter().enumerate() {
+                    if ui.add_enabled(on_track.is_some() || k >= 5, egui::Button::new(name).frame(false)).clicked() {
+                        if let Some(ti) = on_track {
+                            self.sel_track = ti;
+                        }
+                        match (k, on_track) {
+                            (0, Some(ti)) => self.open_roll(ti),
+                            (1, Some(ti)) => self.open_list(vec![listwin::Span { track: ti, block: None }]),
+                            (2, Some(ti)) => self.open_staff(ti),
+                            (3, Some(ti)) => self.open_drum(ti),
+                            (4, _) => self.open_lyrics(),
+                            (5, _) => {
+                                self.chords_win.get_or_insert_with(Default::default);
+                            }
+                            (6, _) => self.open_master(),
+                            (7, _) => self.show_mixer = true,
+                            (8, _) => {
+                                self.show_xg = true;
+                                self.xg.sync_from_song(&self.edit);
+                            }
+                            (9, _) => {
+                                self.show_xgm = true;
+                                self.xg.sync_from_song(&self.edit);
+                            }
+                            _ => {}
+                        }
+                        close = true;
+                    }
+                }
+                // track jobs for the track under the click
+                ui.separator();
+                for (k, name) in ["Demix by Channel...", "Demix by Note...", "Transpose..."].into_iter().enumerate() {
+                    if ui.add_enabled(on_track.is_some(), egui::Button::new(name).frame(false)).clicked() {
+                        if let Some(ti) = on_track {
+                            self.sel_track = ti;
+                        }
+                        let ch = self.edit.get(self.sel_track).map_or(0, |t| t.channel);
+                        match k {
+                            0 => self.demix_dlg = Some(demixdlg::DemixDlg::new(false, ch)),
+                            1 => self.demix_dlg = Some(demixdlg::DemixDlg::new(true, ch)),
+                            _ => self.jobs.open = Some(jobwin::Job::Transpose),
+                        }
+                        close = true;
+                    }
+                }
             });
         });
         if ctx.input(|i| i.key_pressed(egui::Key::Escape))
@@ -2956,9 +3411,10 @@ impl App {
 
     /// Track numbers dragged up / down reorder the tracks (Track.hlp).
     fn trk_column(&mut self, ui: &egui::Ui, vis: &[usize], rows: egui::Rect, first: usize, shown: usize) {
-        let col = egui::Rect::from_min_size(rows.min, egui::vec2(TV_COLS[0].1, shown as f32 * ROW_H));
+        let col = egui::Rect::from_min_size(rows.min, egui::vec2(TV_COLS[0].1, shown as f32 * self.row_h));
         let resp = ui.interact(col, ui.id().with("tv_trk_col"), egui::Sense::drag());
-        let row_at = |y: f32| first + ((y - rows.top()) / ROW_H).max(0.0) as usize;
+        let row_h = self.row_h;
+        let row_at = |y: f32| first + ((y - rows.top()) / row_h).max(0.0) as usize;
         if resp.hovered() || resp.dragged() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
         }
@@ -2974,7 +3430,7 @@ impl App {
         if let Some((a, b)) = self.trk_drag {
             if a != b {
                 // insertion mark where the track will go
-                let y = rows.top() + (b as f32 - first as f32 + if b > a { 1.0 } else { 0.0 }) * ROW_H;
+                let y = rows.top() + (b as f32 - first as f32 + if b > a { 1.0 } else { 0.0 }) * row_h;
                 ui.painter().hline(rows.x_range(), y, egui::Stroke::new(2.0_f32, Color32::WHITE));
             }
         }
@@ -3027,5 +3483,73 @@ impl App {
         self.port_sel.clear();
         self.song_edited();
         self.status = format!("Track {} moved to {}.", from + 1, to + 1);
+    }
+}
+
+#[cfg(test)]
+mod zoom_tests {
+    use super::*;
+
+    fn draw(app: &mut App, ctx: &egui::Context) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 900.0))),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.track_view(ui));
+        });
+    }
+
+    #[test]
+    fn track_view_zoom_steps_and_limits() {
+        let mut app = App::new();
+        assert!(!app.tv_can_zoom(true, true), "nothing to zoom without a song");
+        let mid = std::fs::read("../xgworks-core/tests/fixtures/dream.mid").unwrap();
+        app.load(&mid, "dream.mid");
+        let ctx = egui::Context::default();
+        draw(&mut app, &ctx);
+        let ppt = app.px_per_tick;
+        // the original's default: 20 pixels per bar
+        assert!((ppt * 4.0 * app.ppqn as f32 - TV_BAR_PX_DEFAULT).abs() < 1e-3);
+        // horizontal: doubles / halves, the left edge stays
+        app.view_t0 = 1920.0;
+        app.tv_zoom(true, true);
+        assert!((app.px_per_tick - ppt * 2.0).abs() < 1e-6);
+        assert_eq!(app.view_t0, 1920.0);
+        app.tv_zoom(true, false);
+        assert!((app.px_per_tick - ppt).abs() < 1e-6);
+        for _ in 0..40 {
+            app.tv_zoom(true, true);
+        }
+        assert_eq!(app.px_per_tick, app.tv_ppt(320.0));
+        assert!(!app.tv_can_zoom(true, true) && app.tv_can_zoom(true, false));
+        for _ in 0..40 {
+            app.tv_zoom(true, false);
+        }
+        assert_eq!(app.px_per_tick, app.tv_ppt(5.0));
+        assert!(!app.tv_can_zoom(true, false));
+        // a Ctrl+wheel scale between two levels steps to the neighbouring one
+        app.px_per_tick = app.tv_ppt(30.0);
+        app.tv_zoom(true, true);
+        assert_eq!(app.px_per_tick, app.tv_ppt(40.0));
+        app.px_per_tick = app.tv_ppt(30.0);
+        app.tv_zoom(true, false);
+        assert_eq!(app.px_per_tick, app.tv_ppt(20.0));
+        // vertical: row height steps, greyed at both ends
+        assert_eq!(app.row_h, ROW_H);
+        app.tv_zoom(false, true);
+        assert_eq!(app.row_h, TV_ROW_HS[2]);
+        draw(&mut app, &ctx);
+        for _ in 0..10 {
+            app.tv_zoom(false, true);
+        }
+        assert_eq!(app.row_h, *TV_ROW_HS.last().unwrap());
+        assert!(!app.tv_can_zoom(false, true));
+        for _ in 0..10 {
+            app.tv_zoom(false, false);
+        }
+        assert_eq!(app.row_h, TV_ROW_HS[0]);
+        assert!(!app.tv_can_zoom(false, false) && app.tv_can_zoom(false, true));
+        draw(&mut app, &ctx);
     }
 }

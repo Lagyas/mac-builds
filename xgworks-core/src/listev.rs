@@ -685,7 +685,7 @@ pub fn meta_name(mtype: u8) -> &'static str {
 }
 
 fn meta_text(mtype: u8, d: &[u8], names: &ListNames) -> RowText {
-    let text = |d: &[u8]| d.iter().map(|&b| if b >= 0x20 { b as char } else { ' ' }).collect::<String>();
+    let text = |d: &[u8]| crate::textenc::decode(d).chars().map(|c| if (c as u32) < 0x20 { ' ' } else { c }).collect::<String>();
     let hex = |d: &[u8]| d.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ");
     let (ty, v1) = match (mtype, d) {
         (0x01..=0x07, _) => (meta_name(mtype).to_string(), text(d)),
@@ -830,7 +830,7 @@ pub fn set_value(e: &Event, col: usize, text: &str, ppqn: u32) -> Option<Event> 
             };
             with_value(e, 1, v)
         }
-        (Event::Meta { mtype: m @ 0x01..=0x07, t: tk, .. }, 0) => Some(Event::Meta { t: *tk, mtype: *m, data: t.as_bytes().to_vec() }),
+        (Event::Meta { mtype: m @ 0x01..=0x07, t: tk, .. }, 0) => Some(Event::Meta { t: *tk, mtype: *m, data: crate::textenc::encode(t) }),
         (Event::Meta { mtype: 0x51, t: tk, .. }, 0) => {
             let bpm: f64 = t.parse().ok()?;
             let us = (60_000_000.0 / bpm.clamp(1.0, 999.0)).round() as u32;

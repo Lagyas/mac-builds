@@ -1,4 +1,4 @@
-name: macOS apps
+name: macOS and Linux apps
 on:
   workflow_dispatch:
 permissions:
@@ -28,6 +28,8 @@ jobs:
           codesign -dv --entitlements - dd/Build/Products/Release/HS2.app/Contents/PlugIns/HS2AU.appex 2>&1 | tail -20
       - name: HS2 Classic.app
         run: sh hs2-native/build_macos.sh
+      - name: XGWorks NextGen tests (core unit tests; the song fixtures stay private)
+        run: cargo test --release --lib --manifest-path xgworks-core/Cargo.toml
       - name: XGWorks NextGen.app
         run: sh xgworks-native/build_macos.sh
       - name: Package
@@ -43,9 +45,35 @@ jobs:
         with:
           name: Lagyas-macOS-apps
           path: Lagyas-macOS-apps.zip
+
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libasound2-dev libgtk-3-dev             libxkbcommon-dev libgl1-mesa-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libwayland-dev
+      - name: XGWorks NextGen tests (core unit tests)
+        run: cargo test --release --lib --manifest-path xgworks-core/Cargo.toml
+      - name: XGWorks NextGen (Linux x86-64)
+        run: sh xgworks-native/build_linux.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: XGWorks-NextGen-linux
+          path: xgworks-native/target/XGWorks-NextGen-linux-x86_64.tar.gz
+
+  release:
+    needs: [build, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dl
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="build-${{ github.run_number }}"
-          gh release create "$TAG" Lagyas-macOS-apps.zip --prerelease --title "macOS apps $TAG" --notes "$(git log -1 --format=%B)"
+          gh release create "$TAG" dl/Lagyas-macOS-apps/Lagyas-macOS-apps.zip dl/XGWorks-NextGen-linux/XGWorks-NextGen-linux-x86_64.tar.gz             --prerelease --title "macOS and Linux apps $TAG" --notes "$(git log -1 --format=%B)"
